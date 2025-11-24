@@ -1,0 +1,39 @@
+name: famam
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+
+dependencies:
+  # Core Python
+  - python=3.10
+
+  # Scientific stack
+  - numpy
+  - matplotlib
+  - scikit-learn
+
+  # Music / symbolic processing
+  - music21
+
+  # Jupyter
+  - jupyterlab
+  - notebook
+  - ipykernel
+
+  # PyTorch with CUDA (from conda)
+  - pytorch
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=12.1  # adjust if your CUDA toolchain is different
+
+  # Conda inside the env (optional but you asked for it)
+  - conda
+
+  # TensorFlow + Keras via pip (conda-first, but TF is better from pip)
+  - pip
+  - pip:
+      - tensorflow
+      - keras
+
