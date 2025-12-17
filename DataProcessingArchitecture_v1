@@ -1,0 +1,209 @@
+@startuml
+
+Class MusicSample {
+  +music: Music
+  +labels: dict
+  +file_path: string
+  +get_label(key: string)
+  +set_label(key: string, value)
+}
+
+Class EncodedSample {
+  +sequence: ndarray
+  +labels: dict
+  +length: int
+  +segment_id: int
+}
+
+Class Music {
+  +tracks: Track[]
+  +tempos: Tempo[]
+  +resolution: int
+}
+
+Class DataPipeline {
+  -processes: DataProcessor[]
+  -label_encoder: LabelEncoder
+  +process_from_start()
+  +process_from_index(index: int)
+  +load_gigamidi_metadata()
+}
+
+Class LabelEncoder {
+  -label_mappings: dict
+  +encode_labels(labels: dict): dict
+  +decode_labels(encoded: dict): dict
+  +get_vocab_sizes(): dict
+}
+
+Abstract DataProcessor {
+  {abstract} +process(sample: MusicSample): MusicSample
+  +validate_input(sample: MusicSample): bool
+  +get_name(): string
+}
+
+Class FilterProcess {
+  -min_duration: int
+  -max_duration: int
+  +process(sample: MusicSample): MusicSample
+  +filter_by_duration()
+  +filter_by_labels()
+}
+
+Class ValidationProcess {
+  -strict_mode: bool
+  +process(sample: MusicSample): MusicSample
+  +check_midi_validity()
+  +validate_labels()
+}
+
+Class CleanProcess {
+  +process(sample: MusicSample): MusicSample
+  +remove_empty_tracks()
+  +fix_overlapping_notes()
+}
+
+Class NormalizationProcess {
+  -target_key: string
+  +process(sample: MusicSample): MusicSample
+  +transpose_to_key()
+  +normalize_tempo_range()
+}
+
+Class QuantizationProcess {
+  -resolution: int
+  +process(sample: MusicSample): MusicSample
+  +snap_to_grid()
+}
+
+Class EncodingProcess {
+  -encoding_type: string
+  -vocab_size: int
+  +process(sample: MusicSample): EncodedSample
+  +encode_music(): ndarray
+  +encode_labels(): dict
+  +build_vocabulary()
+}
+
+Class SegmentationProcess {
+  -segment_length: int
+  -overlap: int
+  +process(sample: EncodedSample): list[EncodedSample]
+  +create_segments()
+  +preserve_labels()
+}
+
+Class SplitProcess {
+  -train_ratio: float
+  -val_ratio: float
+  -test_ratio: float
+  +process(samples: list): dict
+  +stratified_split_by_labels()
+}
+
+Class AugmentationProcess {
+  -augmentation_types: list
+  +process(sample: EncodedSample): EncodedSample
+  +pitch_shift()
+  +time_stretch()
+  +preserve_labels()
+}
+
+Class DataPreparator {
+  -gigamidi_path: string
+  -metadata_path: string
+  -output_path: string
+  -num_workers: int
+  +load_gigamidi_metadata(): DataFrame
+  +scan_midi_files(): list[Path]
+  +create_music_sample(path: Path): MusicSample
+  +prepare_dataset(): list[MusicSample]
+  +prepare_parallel(): list[MusicSample]
+  +save_samples(samples: list)
+}
+
+DataPipeline *-- DataPreparator
+
+FilterProcess -down--|> DataProcessor
+ValidationProcess -down-|> DataProcessor
+CleanProcess -down--|> DataProcessor
+NormalizationProcess -down-|> DataProcessor
+QuantizationProcess -down--|> DataProcessor
+EncodingProcess -down-|> DataProcessor
+SegmentationProcess -down--|> DataProcessor
+SplitProcess -down-|> DataProcessor
+AugmentationProcess -down--|> DataProcessor
+
+DataProcessor "0..*"--o "1" DataPipeline : contains
+DataPipeline *-- LabelEncoder
+MusicSample *-- Music
+EncodedSample ..> MusicSample : derived from
+
+database GigaMidi {
+}
+
+note bottom of GigaMidi
+  Raw MIDI files + metadata CSV
+  Labels: composer, genre, year, etc.
+  ~1.2M songs
+end note
+
+database Raw {
+}
+
+note left of DataPreparator
+  turns all midi into MusicSamples and saves them
+  into raw. This runs once. Never again, will take
+  quite a lot of time to run.
+end note
+
+DataPipeline -down- Raw : writes MusicSamples
+
+note bottom of Raw
+  MusicSample object converted from the
+  GigaMidi for further processing
+  MusicSample objects
+  Music + attached labels
+  Music is a MusPy class
+  end note
+database Validated {
+}
+
+
+note bottom of Validated
+  MusicSample objects
+  Music + attached labels
+  Cleaned and normalized
+end note
+
+database Processed {
+}
+
+note bottom of Processed
+  EncodedSample objects
+  Sequences + encoded labels
+  Train/Val/Test splits
+  Ready for training
+end note
+
+DataPipeline --> GigaMidi : reads MIDI + labels
+DataPipeline --> Validated : writes validated MusicSample
+DataPipeline --> Processed : outputs EncodedSample
+
+note right of DataPipeline
+  Pipeline flow:
+  1. Load MIDI + GigaMIDI labels → MusicSample
+  2. Filter/Validate/Clean/Normalize (keep labels)
+  3. Encode music + labels → EncodedSample
+  4. Segment/Split/Augment (preserve labels)
+  
+  Labels stay attached throughout pipeline
+end note
+
+note bottom of LabelEncoder
+  Converts categorical labels to integers:
+  'Bach' → 42, 'classical' → 3
+  Maintains vocabulary mappings
+end note
+
+@enduml
