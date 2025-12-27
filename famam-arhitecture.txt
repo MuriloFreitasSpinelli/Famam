@@ -1,0 +1,94 @@
+@startuml
+
+Package data_preprocessing {
+  Class Music {
+  }
+  
+  Class LabeledMusic {
+  }
+  
+  Class EncodedSample {
+  }
+  
+  Class DataPipeline {
+  }
+  
+  Abstract DataCheckpoint {
+  }
+  
+  Abstract DataProcess {
+  }
+  
+  Class LabelEncoder {
+    labels to ints
+  }
+  
+  Music "1" --* "1" LabeledMusic
+  EncodedSample ..> LabeledMusic : Derived from
+  DataProcess ..> LabeledMusic : Uses
+  DataProcess ..> EncodedSample : Returns
+  DataPipeline *-- DataProcess
+  DataPipeline *-- DataCheckpoint
+  DataPipeline -- LabelEncoder
+}
+
+
+Package data_loading {
+  Abstract DataLoader {
+  }
+  
+  Class TrainDataLoader {
+  }
+  
+  Class ValidationDataLoader {
+  }
+  
+  Class TestDataLoader {
+  }
+  
+  DataLoader <|-- TrainDataLoader
+  DataLoader <|-- ValidationDataLoader
+  DataLoader <|-- TestDataLoader
+}
+
+Package model_training {
+
+}
+
+note top of data_loading
+  Serves data to the training model, can be
+  shuffled can be ordered can be whatever,
+  many strategies in serving, but always serve
+  as much as possible
+end note
+
+DataLoader -- Samples : loads
+
+DataPipeline -left- GigaMidi : reads
+DataPipeline -left- Labeled : writes
+DataPipeline -left- Samples : writes
+
+Database GigaMidi <<Cloud>> {
+}
+
+Database Labeled <<Local>> {
+}
+
+note top of Labeled
+  Labled are separated into sets, 
+  we can process into a set from 
+  gigamidi
+end note
+
+Database Samples <<Local>> {
+}
+
+note bottom of Samples
+  Sequences + encoded labels,
+  Train Val Test splits, ready for training
+end note
+
+GigaMidi ..> Labeled : Saves into
+Labeled <.. Samples :Comes from
+
+@enduml
