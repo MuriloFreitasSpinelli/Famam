@@ -23,6 +23,9 @@ Package data_preprocessing {
     labels to ints
   }
   
+  Class DataPreprocessingConfig
+  
+  DataPipeline --> DataPreprocessingConfig : Uses
   Music "1" --* "1" LabeledMusic
   EncodedSample ..> LabeledMusic : Derived from
   DataProcess ..> LabeledMusic : Uses
@@ -46,13 +49,13 @@ Package data_loading {
   Class TestDataLoader {
   }
   
+  Class LoaderConfig {
+  }
+  
+  DataLoader -left-> LoaderConfig : Uses
   DataLoader <|-- TrainDataLoader
   DataLoader <|-- ValidationDataLoader
   DataLoader <|-- TestDataLoader
-}
-
-Package model_training {
-
 }
 
 note top of data_loading
@@ -90,5 +93,19 @@ end note
 
 GigaMidi ..> Labeled : Saves into
 Labeled <.. Samples :Comes from
+
+Package model {
+  Class ModelTrainer 
+  Class ModelValidator
+  Class ModelTesting
+  
+  ModelTrainer -up- TrainDataLoader
+  ModelValidator -up- ValidationDataLoader
+  ModelTesting -up- TestDataLoader
+}
+
+Package music_generation {
+  Class MusicGenerator
+}
 
 @enduml
