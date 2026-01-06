@@ -1,6 +1,6 @@
-@startuml Simple DataLoader - Phase 1
+@startuml Keras-Based DataLoader - Phase 1
 
-!define LOADER #E3F2FD
+!define KERAS #E3F2FD
 !define STRATEGY #FFF3E0
 !define CONFIG #F3E5F5
 
@@ -9,45 +9,49 @@
 ' ===============================================================================
 
 package "Configuration" CONFIG {
-  class LoadingConfig {
+  class DatasetConfig {
     +batch_size: int
     +shuffle: bool
-    +drop_last: bool
     +seed: Optional[int]
     --
     +to_dict(): Dict
-    +from_dict(config_dict: Dict): LoadingConfig
+    +from_dict(config_dict: Dict): DatasetConfig
   }
 }
 
 ' ===============================================================================
-' Core Abstraction
+' Core Abstraction (Strategy Pattern)
 ' ===============================================================================
 
-package "Core" STRATEGY {
+package "Loading Strategy" STRATEGY {
   abstract class LoadingStrategy {
     {abstract} +load_batch(file_handle: h5py.File, indices: np.ndarray): Tuple
     {abstract} +get_sample_count(file_handle: h5py.File): int
   }
+  
+  note right of LoadingStrategy
+    Simple 2-method interface
+    Defines HOW to load data from HDF5
+  end note
 }
 
 ' ===============================================================================
-' Phase 1 Strategies
+' Concrete Strategies
 ' ===============================================================================
 
 package "Phase 1 Strategies" STRATEGY {
   class BasicLoadingStrategy {
-    +tokens_key: str
-    +labels_key: str
+    +tokens_key: str = "tokens"
+    +labels_key: str = "labels"
     --
     +load_batch(file_handle, indices): Tuple[np.ndarray, np.ndarray]
     +get_sample_count(file_handle): int
   }
 
   class ConditionalLoadingStrategy {
-    +tokens_key: str
-    +labels_key: str
-    +one_hot_encode: bool
+    +tokens_key: str = "tokens"
+    +labels_key: str = "labels"
+    +one_hot_encode: bool = True
     +num_classes: int
     --
     +load_batch(file_handle, indices): Tuple[Dict, np.ndarray]
@@ -55,9 +59,9 @@ package "Phase 1 Strategies" STRATEGY {
   }
 
   class MultiInputLoadingStrategy {
-    +tokens_key: str
-    +drum_tokens_key: str
-    +labels_key: str
+    +tokens_key: str = "tokens"
+    +drum_tokens_key: str = "drum_tokens"
+    +labels_key: str = "labels"
     --
     +load_batch(file_handle, indices): Tuple[Dict, np.ndarray]
     +get_sample_count(file_handle): int
@@ -65,149 +69,166 @@ package "Phase 1 Strategies" STRATEGY {
 }
 
 ' ===============================================================================
-' Main DataLoader
+' Main Keras Sequence
 ' ===============================================================================
 
-package "DataLoader" LOADER {
-  class MusicDataLoader {
+package "Keras Integration" KERAS {
+  class "keras.utils.Sequence" as KerasSequence <<builtin>> {
+    {abstract} +__len__(): int
+    {abstract} +__getitem__(idx: int): Tuple
+    +on_epoch_end()
+  }
+  
+  class MusicDataSequence {
     +hdf5_path: Path
+    +config: DatasetConfig
     +loading_strategy: LoadingStrategy
-    +config: LoadingConfig
     -_file_handle: h5py.File
     -_total_samples: int
     -_indices: np.ndarray
     --
     +__len__(): int
-    +__iter__(): Iterator
     +__getitem__(idx: int): Tuple
-    +reset()
+    +on_epoch_end()
     +close()
     +__enter__()
     +__exit__()
     -_initialize()
+    -_shuffle_indices()
   }
-
-  class KerasSequenceAdapter {
-    +dataloader: MusicDataLoader
-    --
-    +__len__(): int
-    +__getitem__(idx: int): Tuple
-    +on_epoch_end()
-  }
+  
+  note right of MusicDataSequence
+    Main class - wraps HDF5 loading
+    with pluggable strategies
+    
+    Works directly with model.fit():
+      sequence = MusicDataSequence(
+          hdf5_path="train.h5",
+          strategy=BasicLoadingStrategy()
+      )
+      model.fit(sequence, epochs=10)
+  end note
 }
 
 ' ===============================================================================
 ' Relationships
 ' ===============================================================================
 
+' Inheritance
+KerasSequence <|-- MusicDataSequence
 LoadingStrategy <|-- BasicLoadingStrategy
 LoadingStrategy <|-- ConditionalLoadingStrategy
 LoadingStrategy <|-- MultiInputLoadingStrategy
 
-MusicDataLoader *-- LoadingConfig
-MusicDataLoader *-- LoadingStrategy
-
-KerasSequenceAdapter *-- MusicDataLoader
+' Composition
+MusicDataSequence *-- DatasetConfig
+MusicDataSequence *-- LoadingStrategy
 
 ' ===============================================================================
-' Notes
+' Usage Examples
 ' ===============================================================================
 
-note top of LoadingStrategy
-  **Simple Strategy Pattern**
+note as UsageExamples
+  **Usage Examples**
   
-  Just 2 methods needed:
-  - load_batch(): Load data from HDF5
-  - get_sample_count(): Get total samples
-  
-  Easy to swap strategies
-end note
-
-note top of MusicDataLoader
-  **Main DataLoader**
-  
-  Simple usage:
+  **1. Basic unconditional generation:**
     strategy = BasicLoadingStrategy()
-    loader = MusicDataLoader(
-        hdf5_path="train.h5",
-        loading_strategy=strategy,
-        config=LoadingConfig(batch_size=32)
+    train_seq = MusicDataSequence(
+        hdf5_path="data/encoded_samples/jazz_polyphonic/train.h5",
+        config=DatasetConfig(batch_size=32, shuffle=True),
+        loading_strategy=strategy
     )
+    model.fit(train_seq, epochs=10)
+  
+  **2. Conditional generation (genre):**
+    strategy = ConditionalLoadingStrategy(num_classes=10)
+    train_seq = MusicDataSequence(
+        hdf5_path="data/encoded_samples/jazz_polyphonic/train.h5",
+        config=DatasetConfig(batch_size=32),
+        loading_strategy=strategy
+    )
+    model.fit(train_seq, epochs=10)
+  
+  **3. Multi-input (pitched + drums):**
+    strategy = MultiInputLoadingStrategy()
+    train_seq = MusicDataSequence(
+        hdf5_path="data/encoded_samples/jazz_polyphonic/train.h5",
+        config=DatasetConfig(batch_size=32),
+        loading_strategy=strategy
+    )
+    model.fit(train_seq, epochs=10)
+  
+  **4. Multiple splits:**
+    train_seq = MusicDataSequence("train.h5", strategy=strategy)
+    val_seq = MusicDataSequence("val.h5", strategy=strategy)
     
-    # Use with Keras
     model.fit(
-        KerasSequenceAdapter(loader),
+        train_seq,
+        validation_data=val_seq,
         epochs=10
     )
-    
-    # Or iterate manually
-    for tokens, labels in loader:
-        # Train step
-        pass
 end note
 
-note right of BasicLoadingStrategy
-  **For unconditional generation**
-  
-  Returns: (tokens, labels)
+' ===============================================================================
+' Strategy Details
+' ===============================================================================
+
+note bottom of BasicLoadingStrategy
+  **Returns:** (tokens, labels)
   
   tokens: [batch_size, seq_len]
   labels: [batch_size, num_labels]
   
-  Simplest strategy - just loads
-  tokens and labels from HDF5
+  Simple loading for unconditional generation
 end note
 
-note right of ConditionalLoadingStrategy
-  **For conditional generation**
+note bottom of ConditionalLoadingStrategy
+  **Returns:** ({tokens, condition}, targets)
   
-  Returns: ({tokens, condition}, targets)
+  Input dict:
+    - tokens: [batch_size, seq_len]
+    - condition: [batch_size, num_classes] (one-hot)
   
-  tokens: [batch_size, seq_len]
-  condition: [batch_size, num_classes]
   targets: [batch_size, seq_len]
   
-  One-hot encodes labels for
-  genre/label conditioning
+  For genre/style conditioning
 end note
 
-note right of MultiInputLoadingStrategy
-  **For pitched + drums model**
+note bottom of MultiInputLoadingStrategy
+  **Returns:** ({pitched_tokens, drum_tokens}, labels)
   
-  Returns: ({pitched_tokens, drum_tokens}, labels)
+  Input dict:
+    - pitched_tokens: [batch_size, seq_len]
+    - drum_tokens: [batch_size, seq_len]
   
-  pitched_tokens: [batch_size, seq_len]
-  drum_tokens: [batch_size, seq_len]
   labels: [batch_size, num_labels]
   
-  Loads separate pitched and drum
-  encodings when available
+  For models with separate pitched/drum encoders
 end note
 
-note bottom of KerasSequenceAdapter
-  **Keras Integration**
-  
-  Wraps DataLoader as keras.utils.Sequence
-  
-  Works seamlessly with model.fit():
-    adapter = KerasSequenceAdapter(loader)
-    model.fit(adapter, epochs=10)
-end note
+' ===============================================================================
+' Design Notes
+' ===============================================================================
 
-note as N1
-  **Phase 1 Focus: Simple & Extensible**
+note as DesignNotes
+  **Design Principles:**
   
-  Only 3 strategies for Phase 1:
-  1. BasicLoadingStrategy - unconditional generation
-  2. ConditionalLoadingStrategy - genre conditioning
-  3. MultiInputLoadingStrategy - pitched + drums
+  1. **Use Keras built-ins** - No reinventing the wheel
+  2. **Strategy pattern** - Easy to swap loading logic
+  3. **Simple & focused** - Only what Phase 1 needs
+  4. **Extensible** - Add strategies as models evolve
   
-  Add more strategies later as needed:
-  - Just implement LoadingStrategy interface
-  - Plug into MusicDataLoader
+  **Benefits:**
+  - Works natively with model.fit()
+  - Automatic multiprocessing via keras
+  - Built-in validation split support
+  - Simple context manager for file handling
   
-  No complex caching, prefetching, or sampling
-  for now. Keep it simple.
+  **To add new loading strategy:**
+  1. Subclass LoadingStrategy
+  2. Implement load_batch() and get_sample_count()
+  3. Pass to MusicDataSequence
+  Done!
 end note
 
 @enduml
