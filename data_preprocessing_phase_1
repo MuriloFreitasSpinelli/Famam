@@ -1,0 +1,387 @@
+@startuml Phase 1 - Core Pipeline
+
+!define PHASE1 #E8F5E9
+
+' ===============================================================================
+' Configuration Classes
+' ===============================================================================
+
+package "Configuration" PHASE1 {
+  class PreprocessingConfig {
+    +genre_filter: str
+    +label_source: str
+    +multi_label: bool
+    +max_samples: int
+    +min_length: int
+    +max_length: int
+    +min_note_density: float
+    +tempo_range: Tuple[float, float]
+    +time_signatures: List[str]
+    +required_instruments: List[str]
+    +exclude_drums_only: bool
+    +validation_rules: Dict
+    --
+    +save()
+    +load()
+    +validate_config(): bool
+  }
+
+  class EncodingConfig {
+    +mode: str
+    +instrument: Optional[str]
+    +include_drums: bool
+    +separate_drum_encoding: bool
+    +quantization: int
+    +augmentation_enabled: bool
+    +augmentation_factor: int
+    +pitch_shift_range: Tuple[int, int]
+    +tempo_change_range: Tuple[float, float]
+    +train_split: float
+    +val_split: float
+    +test_split: float
+    --
+    +save()
+    +load()
+    +validate_config(): bool
+  }
+}
+
+' ===============================================================================
+' Data Structures
+' ===============================================================================
+
+package "Data Structures" PHASE1 {
+  class MusicSample {
+    +id: str
+    +music: muspy.Music
+    +labels: List[int]
+    +label_names: List[str]
+    +primary_label: int
+    +primary_label_name: str
+    +available_instruments: List[str]
+    +has_drums: bool
+    +is_drums_only: bool
+    +gigamidi_metadata: Dict
+    +metadata: Dict
+    --
+    +duration: float
+    +note_density: float
+    +tempo: float
+    +time_signature: str
+    --
+    +to_hdf5(group: h5py.Group)
+    +from_hdf5(group: h5py.Group): MusicSample
+    +validate(): bool
+    +get_instrument_track(instrument: str): muspy.Track
+    +get_pitched_tracks(): List[muspy.Track]
+    +get_drum_tracks(): List[muspy.Track]
+  }
+
+  class EncodedSample {
+    +id: str
+    +tokens: np.ndarray
+    +drum_tokens: Optional[np.ndarray]
+    +labels: List[int]
+    +primary_label: int
+    +original_id: str
+    +is_drum_track: bool
+    +augmentation_type: Optional[str]
+    +metadata: Dict
+    --
+    +sequence_length: int
+    --
+    +to_hdf5(group: h5py.Group)
+    +from_hdf5(group: h5py.Group): EncodedSample
+  }
+
+  class DatasetMetadata {
+    +total_samples: int
+    +genre: str
+    +label_distribution: Dict[str, int]
+    +co_occurrence_matrix: np.ndarray
+    +avg_duration: float
+    +avg_note_density: float
+    +instrument_distribution: Dict[str, int]
+    +drums_only_count: int
+    +has_drums_count: int
+    +no_drums_count: int
+    +tempo_stats: Dict[str, float]
+    +length_stats: Dict[str, float]
+    --
+    +to_json()
+    +from_json()
+    +update_from_sample(sample: MusicSample)
+    +compute_statistics(samples: List[MusicSample])
+  }
+}
+
+' ===============================================================================
+' Stage 1: Music Sample Processing
+' ===============================================================================
+
+package "Stage 1: Raw Data → MusicSamples" PHASE1 {
+  class GigaMIDILoader {
+    +dataset_path: str
+    +_dataset: Dataset
+    --
+    +load_sample(idx: int): Dict
+    +get_samples_by_genre(genre: str, label_source: str): List[Dict]
+    +parse_labels(sample_dict: Dict, label_source: str): List[str]
+    +extract_gigamidi_metadata(sample_dict: Dict): Dict
+    +midi_bytes_to_muspy(midi_bytes: bytes): muspy.Music
+    +__len__(): int
+  }
+
+  class LabelEncoder {
+    +label_to_int: Dict[str, int]
+    +int_to_label: Dict[int, str]
+    +multi_label: bool
+    --
+    +fit(labels: List[str])
+    +encode(label: str): int
+    +encode_multi(labels: List[str]): List[int]
+    +decode(encoded: int): str
+    +decode_multi(encoded: List[int]): List[str]
+    +save(path: str)
+    +load(path: str)
+  }
+
+  class MIDIValidator {
+    +config: PreprocessingConfig
+    --
+    +validate_length(music: muspy.Music): bool
+    +validate_note_density(music: muspy.Music): bool
+    +validate_tempo(music: muspy.Music): bool
+    +validate_time_signature(music: muspy.Music): bool
+    +validate_instruments(music: muspy.Music): bool
+    +check_drums_only(music: muspy.Music): bool
+    +validate(music: muspy.Music, gigamidi_meta: Dict): Tuple[bool, List[str]]
+  }
+
+  class MIDICleaner {
+    --
+    +remove_empty_tracks(music: muspy.Music): muspy.Music
+    +remove_duplicates(music: muspy.Music): muspy.Music
+    +fix_overlapping_notes(music: muspy.Music): muspy.Music
+    +normalize_tempo(music: muspy.Music): muspy.Music
+    +separate_drums(music: muspy.Music): Tuple[muspy.Music, muspy.Music]
+    +clean(music: muspy.Music): muspy.Music
+  }
+
+  class InstrumentDetector {
+    --
+    +detect_drums(music: muspy.Music): bool
+    +is_drums_only(music: muspy.Music): bool
+    +get_drum_tracks(music: muspy.Music): List[muspy.Track]
+    +get_pitched_tracks(music: muspy.Music): List[muspy.Track]
+    +get_available_instruments(music: muspy.Music): List[str]
+    +map_midi_program_to_instrument(program: int): str
+    +is_drum_program(program: int): bool
+  }
+
+  class MusicSampleProcessor {
+    +config: PreprocessingConfig
+    +loader: GigaMIDILoader
+    +validator: MIDIValidator
+    +cleaner: MIDICleaner
+    +label_encoder: LabelEncoder
+    +instrument_detector: InstrumentDetector
+    +output_dir: str
+    --
+    +process_single_sample(sample_dict: Dict): Optional[MusicSample]
+    +process_dataset(genre: str, max_samples: int): List[MusicSample]
+    +save_to_hdf5(samples: List[MusicSample], output_path: str)
+    +save_metadata(metadata: DatasetMetadata, output_path: str)
+  }
+
+  class MusicSampleDataset {
+    +hdf5_path: str
+    +metadata: DatasetMetadata
+    +config: PreprocessingConfig
+    +_sample_ids: List[str]
+    --
+    +__len__(): int
+    +__getitem__(idx: int): MusicSample
+    +get_by_id(id: str): MusicSample
+    +get_samples_with_instrument(instrument: str): List[str]
+    +get_samples_with_drums(): List[str]
+    +get_samples_without_drums(): List[str]
+    +get_samples_by_label(label: int): List[str]
+    +save_metadata()
+    +load_metadata()
+  }
+}
+
+' ===============================================================================
+' Stage 2: Encoding and Segmentation
+' ===============================================================================
+
+package "Stage 2: MusicSamples → EncodedSamples" PHASE1 {
+  class MIDIEncoder {
+    +config: EncodingConfig
+    +vocab_size: int
+    --
+    +encode_polyphonic(music: muspy.Music): np.ndarray
+    +encode_monophonic(music: muspy.Music, instrument: str): np.ndarray
+    +encode_drums(music: muspy.Music): np.ndarray
+    +encode(sample: MusicSample): Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]
+    +decode(tokens: np.ndarray, is_drums: bool): muspy.Music
+    +get_vocab_size(): int
+  }
+
+  class Segmenter {
+    +segment_length: int
+    +overlap: int
+    --
+    +segment(tokens: np.ndarray): List[np.ndarray]
+    +segment_with_padding(tokens: np.ndarray): List[np.ndarray]
+    +calculate_num_segments(sequence_length: int): int
+  }
+
+  class Augmenter {
+    +config: EncodingConfig
+    --
+    +pitch_shift(music: muspy.Music, semitones: int): muspy.Music
+    +tempo_change(music: muspy.Music, factor: float): muspy.Music
+    +augment_drums(music: muspy.Music): muspy.Music
+    +augment(sample: MusicSample): List[MusicSample]
+    +get_augmentation_params(): List[Dict]
+  }
+
+  class EncodedSampleProcessor {
+    +config: EncodingConfig
+    +encoder: MIDIEncoder
+    +segmenter: Segmenter
+    +augmenter: Augmenter
+    +output_dir: str
+    --
+    +process_single_sample(sample: MusicSample): List[EncodedSample]
+    +process_dataset(input_path: str): List[EncodedSample]
+    +split_train_val_test(samples: List[EncodedSample]): Dict[str, List[EncodedSample]]
+    +save_to_hdf5(samples: Dict[str, List[EncodedSample]], output_dir: str)
+    +save_config()
+  }
+
+  class EncodedSampleDataset {
+    +train_path: str
+    +val_path: str
+    +test_path: str
+    +config: EncodingConfig
+    +_file_handles: Dict[str, h5py.File]
+    --
+    +load_split(split: str): h5py.File
+    +__len__(split: str): int
+    +__getitem__(split: str, idx: int): Tuple[np.ndarray, List[int]]
+    +close()
+    +__enter__()
+    +__exit__()
+  }
+}
+
+' ===============================================================================
+' Relationships
+' ===============================================================================
+
+' Configuration
+PreprocessingConfig -- MusicSampleProcessor
+EncodingConfig -- EncodedSampleProcessor
+
+' Stage 1
+GigaMIDILoader -- MusicSampleProcessor
+LabelEncoder -- MusicSampleProcessor
+MIDIValidator -- MusicSampleProcessor
+MIDICleaner -- MusicSampleProcessor
+InstrumentDetector -- MusicSampleProcessor
+
+MusicSampleProcessor --> MusicSample : creates
+MusicSampleProcessor --> MusicSampleDataset : saves to
+MusicSampleProcessor --> DatasetMetadata : creates
+
+MusicSampleDataset --> MusicSample : loads
+MusicSampleDataset *-- DatasetMetadata
+
+' Stage 2
+MusicSampleDataset --> EncodedSampleProcessor : provides samples
+EncodedSampleProcessor *-- MIDIEncoder
+EncodedSampleProcessor *-- Segmenter
+EncodedSampleProcessor *-- Augmenter
+
+EncodedSampleProcessor --> EncodedSample : creates
+EncodedSampleProcessor --> EncodedSampleDataset : saves to
+
+EncodedSampleDataset --> EncodedSample : loads
+
+' ===============================================================================
+' Notes
+' ===============================================================================
+
+note top of PreprocessingConfig
+  **Configuration for Stage 1**
+  Defines filtering, validation,
+  and cleaning parameters
+end note
+
+note top of EncodingConfig
+  **Configuration for Stage 2**
+  Defines encoding, segmentation,
+  and augmentation parameters
+end note
+
+note right of MusicSample
+  **Stored in HDF5:**
+  data/music_samples/genre/
+  ├── samples/
+  │   ├── track_001.h5
+  │   ├── track_002.h5
+  │   └── ...
+  ├── metadata.json
+  └── config.json
+  
+  **Each sample contains:**
+  - muspy.Music object
+  - Multi-label support
+  - ALL gigamidi_metadata
+  - Instrument information
+  - Drums detection
+end note
+
+note right of EncodedSample
+  **Stored in HDF5:**
+  data/encoded_samples/genre_mode/
+  ├── train.h5
+  │   ├── tokens [N, seq_len]
+  │   ├── labels [N, num_labels]
+  │   └── metadata [N]
+  ├── val.h5
+  ├── test.h5
+  └── encoding_config.json
+  
+  **Returns to model:**
+  (tokens, labels)
+  
+  Simple unconditional generation
+end note
+
+note bottom of MusicSampleProcessor
+  **Pipeline:**
+  1. Load from GigaMIDI
+  2. Parse multi-labels
+  3. Validate MIDI
+  4. Clean MIDI
+  5. Detect instruments/drums
+  6. Create MusicSample
+  7. Save to HDF5
+end note
+
+note bottom of EncodedSampleProcessor
+  **Pipeline:**
+  1. Load MusicSample
+  2. Augment (if enabled)
+  3. Encode to tokens
+  4. Segment sequences
+  5. Create EncodedSample
+  6. Split train/val/test
+  7. Save to HDF5
+end note
+
+@enduml
