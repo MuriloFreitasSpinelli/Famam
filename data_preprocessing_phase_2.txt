@@ -1,0 +1,329 @@
+@startuml Phase 2 - Label Conditioning
+
+!define PHASE1 #E8F5E9
+!define PHASE2 #FFF9C4
+
+' ===============================================================================
+' Phase 1 Classes (inherited/reused)
+' ===============================================================================
+
+package "Phase 1 (Reused)" PHASE1 {
+  class EncodingConfig {
+    +mode: str
+    +instrument: Optional[str]
+    +include_drums: bool
+    +separate_drum_encoding: bool
+    +quantization: int
+    +augmentation_enabled: bool
+    +augmentation_factor: int
+    +pitch_shift_range: Tuple[int, int]
+    +tempo_change_range: Tuple[float, float]
+    +train_split: float
+    +val_split: float
+    +test_split: float
+    --
+    +save()
+    +load()
+  }
+
+  class MusicSample {
+    +id: str
+    +music: muspy.Music
+    +labels: List[int]
+    +label_names: List[str]
+    +primary_label: int
+    +available_instruments: List[str]
+    +has_drums: bool
+    +gigamidi_metadata: Dict
+    +metadata: Dict
+    --
+    +to_hdf5(group: h5py.Group)
+    +from_hdf5(group: h5py.Group): MusicSample
+  }
+
+  class MusicSampleDataset {
+    +hdf5_path: str
+    +metadata: DatasetMetadata
+    --
+    +__len__(): int
+    +__getitem__(idx: int): MusicSample
+  }
+
+  class LabelEncoder {
+    +label_to_int: Dict[str, int]
+    +int_to_label: Dict[int, str]
+    +multi_label: bool
+    --
+    +encode(label: str): int
+    +encode_multi(labels: List[str]): List[int]
+    +decode(encoded: int): str
+    +save()
+    +load()
+  }
+
+  class MIDIEncoder {
+    +config: EncodingConfig
+    --
+    +encode(sample: MusicSample): np.ndarray
+  }
+
+  class Segmenter {
+    +segment_length: int
+    +overlap: int
+    --
+    +segment(tokens: np.ndarray): List[np.ndarray]
+  }
+
+  class Augmenter {
+    +config: EncodingConfig
+    --
+    +augment(sample: MusicSample): List[MusicSample]
+  }
+}
+
+' ===============================================================================
+' Phase 2: New Configuration
+' ===============================================================================
+
+package "Phase 2: Configuration" PHASE2 {
+  class ConditionalEncodingConfig {
+    ' Inherits all from EncodingConfig
+    +use_label_conditioning: bool
+    +label_embedding_dim: int
+    +label_conditioning_type: str
+    --
+    +save()
+    +load()
+    +validate_config(): bool
+  }
+}
+
+' ===============================================================================
+' Phase 2: Label Conditioning Components
+' ===============================================================================
+
+package "Phase 2: Label Conditioning" PHASE2 {
+  class LabelConditioner {
+    +num_labels: int
+    +embedding_dim: int
+    +conditioning_type: str
+    +label_encoder: LabelEncoder
+    --
+    +encode_single_label(label: int): np.ndarray
+    +encode_multi_label(labels: List[int]): np.ndarray
+    +encode_multi_hot(labels: List[int]): np.ndarray
+    +get_embedding_dim(): int
+    +save(path: str)
+    +load(path: str)
+  }
+
+  note right of LabelConditioner
+    **Conditioning Types:**
+    
+    1. "multi_hot": 
+       [0, 0, 1, 0, 1] for labels
+       Dim = num_labels
+    
+    2. "embedding":
+       [0.2, -0.5, 0.8, ...] per label
+       Then average/concat
+       Dim = embedding_dim
+    
+    3. "weighted":
+       Weighted sum based on
+       label confidence scores
+  end note
+}
+
+' ===============================================================================
+' Phase 2: Modified Data Structures
+' ===============================================================================
+
+package "Phase 2: Data Structures" PHASE2 {
+  class EncodedSample_V2 {
+    ' All fields from Phase 1
+    +id: str
+    +tokens: np.ndarray
+    +drum_tokens: Optional[np.ndarray]
+    +labels: List[int]
+    +primary_label: int
+    +original_id: str
+    +is_drum_track: bool
+    +augmentation_type: Optional[str]
+    +metadata: Dict
+    --
+    ' NEW in Phase 2
+    +label_conditioning: np.ndarray
+    --
+    +sequence_length: int
+    --
+    +to_hdf5(group: h5py.Group)
+    +from_hdf5(group: h5py.Group): EncodedSample_V2
+    +get_conditioning(): np.ndarray
+  }
+
+  note right of EncodedSample_V2
+    **label_conditioning:**
+    Pre-computed label vector
+    for faster training
+    
+    Shape depends on conditioning_type:
+    - multi_hot: [num_labels]
+    - embedding: [embedding_dim]
+    
+    Stored in HDF5 alongside tokens
+  end note
+}
+
+' ===============================================================================
+' Phase 2: Modified Processors
+' ===============================================================================
+
+package "Phase 2: Processing Pipeline" PHASE2 {
+  class EncodedSampleProcessor_V2 {
+    +config: ConditionalEncodingConfig
+    +encoder: MIDIEncoder
+    +segmenter: Segmenter
+    +augmenter: Augmenter
+    +label_conditioner: LabelConditioner
+    +output_dir: str
+    --
+    +process_single_sample(sample: MusicSample): List[EncodedSample_V2]
+    +encode_label_conditioning(sample: MusicSample): np.ndarray
+    +process_dataset(input_path: str): List[EncodedSample_V2]
+    +split_train_val_test(samples: List[EncodedSample_V2]): Dict
+    +save_to_hdf5(samples: Dict[str, List[EncodedSample_V2]], output_dir: str)
+  }
+
+  class EncodedSampleDataset_V2 {
+    +train_path: str
+    +val_path: str
+    +test_path: str
+    +config: ConditionalEncodingConfig
+    +label_conditioner: LabelConditioner
+    +_file_handles: Dict[str, h5py.File]
+    --
+    +load_split(split: str): h5py.File
+    +__len__(split: str): int
+    +__getitem__(split: str, idx: int): Tuple[np.ndarray, np.ndarray, List[int]]
+    +get_batch(split: str, indices: List[int]): Tuple[np.ndarray, np.ndarray, np.ndarray]
+    +close()
+  }
+
+  note right of EncodedSampleDataset_V2
+    **Returns:**
+    (tokens, label_conditioning, labels)
+    
+    - tokens: [seq_len]
+    - label_conditioning: [label_dim]
+    - labels: [num_labels] for loss
+  end note
+}
+
+' ===============================================================================
+' Relationships
+' ===============================================================================
+
+' Inheritance
+ConditionalEncodingConfig --|> EncodingConfig
+EncodedSample_V2 --|> "Phase 1::EncodedSample"
+EncodedSampleProcessor_V2 --|> "Phase 1::EncodedSampleProcessor"
+EncodedSampleDataset_V2 --|> "Phase 1::EncodedSampleDataset"
+
+' Composition - Phase 2
+ConditionalEncodingConfig -- EncodedSampleProcessor_V2
+LabelConditioner -- EncodedSampleProcessor_V2
+LabelConditioner -- EncodedSampleDataset_V2
+LabelEncoder -- LabelConditioner
+
+' Reused from Phase 1
+MIDIEncoder -- EncodedSampleProcessor_V2
+Segmenter -- EncodedSampleProcessor_V2
+Augmenter -- EncodedSampleProcessor_V2
+
+' Data flow
+MusicSampleDataset --> EncodedSampleProcessor_V2 : provides
+EncodedSampleProcessor_V2 --> EncodedSample_V2 : creates
+EncodedSampleProcessor_V2 --> EncodedSampleDataset_V2 : saves to
+EncodedSampleDataset_V2 --> EncodedSample_V2 : loads
+
+' ===============================================================================
+' Notes
+' ===============================================================================
+
+note top of ConditionalEncodingConfig
+  **New parameters:**
+  - use_label_conditioning: bool
+  - label_embedding_dim: int
+  - label_conditioning_type: str
+  
+  **Backward compatible:**
+  If use_label_conditioning = False,
+  behaves exactly like Phase 1
+end note
+
+note bottom of EncodedSampleProcessor_V2
+  **Modified Pipeline:**
+  1. Load MusicSample (Phase 1)
+  2. Augment (Phase 1)
+  3. Encode to tokens (Phase 1)
+  4. **NEW: Encode label conditioning**
+  5. Segment (Phase 1)
+  6. Create EncodedSample_V2
+  7. Save to HDF5
+  
+  **Changes from Phase 1:**
+  - Add label_conditioner
+  - Compute label vectors
+  - Store in EncodedSample_V2
+end note
+
+note as StorageNote
+  **HDF5 Storage (Phase 2):**
+  
+  data/encoded_samples/genre_mode_conditional/
+  ├── train.h5
+  │   ├── tokens [N, seq_len]
+  │   ├── label_conditioning [N, label_dim]
+  │   ├── labels [N, num_labels]
+  │   └── metadata [N]
+  ├── val.h5
+  ├── test.h5
+  ├── encoding_config.json
+  └── label_conditioner.pkl
+  
+  **Additional storage: ~5-10% increase**
+  (label_conditioning vectors are small)
+end note
+
+note as UsageNote
+  **Model Training (Phase 2):**
+```python
+  for batch in dataloader:
+      tokens, label_cond, labels = batch
+      # tokens: [B, seq_len]
+      # label_cond: [B, label_dim]
+      # labels: [B, num_labels]
+      
+      logits = model(tokens, conditioning=label_cond)
+      loss = criterion(logits, labels)
+```
+  
+  **Generation (Phase 2):**
+```python
+  # Generate stoner rock
+  label_vec = label_conditioner.encode_multi([
+      label_encoder.encode("stoner_rock")
+  ])
+  generated = model.generate(conditioning=label_vec)
+  
+  # Generate multi-genre
+  label_vec = label_conditioner.encode_multi([
+      label_encoder.encode("stoner_rock"),
+      label_encoder.encode("psychedelic")
+  ])
+  generated = model.generate(conditioning=label_vec)
+```
+end note
+
+@enduml
