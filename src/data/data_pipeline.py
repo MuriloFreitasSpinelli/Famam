@@ -5,10 +5,10 @@ import h5py
 import numpy as np
 from tqdm import tqdm
 
-from data.giga_midi import get_filtered_samples
-from data.enhanced_music import EnhancedMusic, sample_to_enhanced_music
-from data.data_pipeline_config import DataPipelineConfig
-from data.enhanced_music_dataset import EnhancedMusicDataset
+from .giga_midi import get_filtered_samples
+from .enhanced_music import EnhancedMusic, sample_to_enhanced_music
+from .data_pipeline_config import DataPipelineConfig
+from .enhanced_music_dataset import EnhancedMusicDataset
 
 
 def _serialize_enhanced_music(em: EnhancedMusic) -> Dict[str, Any]:

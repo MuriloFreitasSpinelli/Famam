@@ -6,7 +6,7 @@ import numpy as np
 import muspy
 from tqdm import tqdm
 
-from data.enhanced_music import EnhancedMusic
+from .enhanced_music import EnhancedMusic
 
 
 class EnhancedMusicDataset(muspy.Dataset):

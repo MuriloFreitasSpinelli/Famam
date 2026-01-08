@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from io import BytesIO
 from datasets import load_dataset
 from typing import Optional, List, Tuple, Iterator, Dict, Any
+import re
 import muspy
 import pretty_midi
 from symusic import Score
@@ -9,7 +10,7 @@ import symusic
 
 ##Gigamidi dataset is 80% train 10% val 10% test, we will use all of train and split it ourselves, so we
 ##Will be losing out on 20% of the data, but thats not a problem
-dataset = load_dataset("Metacreation/GigaMIDI", split="train", streaming=True)
+dataset = load_dataset("Metacreation/GigaMIDI", name="v2.0.0", split="train", streaming=True)
 
 def get_filtered_samples(
     bpm_range: Optional[Tuple[float, float]] = None,
@@ -17,11 +18,13 @@ def get_filtered_samples(
     num_tracks_range: Optional[Tuple[int, int]] = None,
     loop_instruments: Optional[List[str]] = None,
     artists: Optional[List[str]] = None,
-    max_samples: Optional[int] = None
+    max_samples: Optional[int] = None,
+    max_iterations: int = 100000,
+    verbose: bool = True
 ) -> Iterator[Dict[str, Any]]:
     """
     Filter GigaMIDI samples based on specified criteria.
-    
+
     Args:
         bpm_range: Tuple of (min_bpm, max_bpm) or None to not filter
         genres: List of genres to include or None to not filter
@@ -29,24 +32,54 @@ def get_filtered_samples(
         loop_instruments: List of loop instrument types to include or None to not filter
         artists: List of artists to include or None to not filter
         max_samples: Maximum number of samples to return or None for unlimited
-    
+        max_iterations: Maximum samples to scan before stopping (default 100000)
+        verbose: Print progress updates (default True)
+
     Yields:
         Filtered samples from the dataset
     """
     samples_yielded: int = 0
-    
+    samples_scanned: int = 0
+
     for sample in dataset:
+        samples_scanned += 1
+
+        # Progress update every 1000 samples
+        if verbose and samples_scanned % 1000 == 0:
+            print(f"  Scanned {samples_scanned} samples, found {samples_yielded} matches...")
+
+        # Check if we've exceeded iteration limit
+        if samples_scanned >= max_iterations:
+            if verbose:
+                print(f"  Reached max iterations ({max_iterations}), stopping search.")
+            break
         # Check if we've reached the sample limit
         if max_samples is not None and samples_yielded >= max_samples:
             break
         
+        if not is_giga_metadata_complete(sample):
+            continue
+
         # Filter by BPM
         if bpm_range is not None:
             try:
-                tempo: float = float(sample['tempo'])
+                tempo_value = sample.get('tempo')
+                if tempo_value is None:
+                    continue
+                # Tempo is stored as a string like "Tempo(time=0, qpm=50, mspq=1200000, ttype='Tick')"
+                # Extract qpm value using regex
+                if isinstance(tempo_value, str):
+                    qpm_match = re.search(r'qpm=(\d+(?:\.\d+)?)', tempo_value)
+                    if qpm_match is None:
+                        continue
+                    tempo: float = float(qpm_match.group(1))
+                elif hasattr(tempo_value, 'qpm'):
+                    tempo: float = float(tempo_value.qpm)
+                else:
+                    tempo: float = float(tempo_value)
                 if tempo < bpm_range[0] or tempo > bpm_range[1]:
                     continue
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, AttributeError):
                 continue
         
         # Filter by genre
@@ -74,35 +107,30 @@ def get_filtered_samples(
             if not any(artist.lower() in sample_artist.lower() for artist in artists):
                 continue
         
-        if not is_giga_metadata_complete(sample):
-            continue
 
         yield sample
         samples_yielded += 1
 
 def is_giga_metadata_complete(sample: Dict[str, Any]) -> bool:
     """
-    Check if the sample contains all expected GigaMIDI metadata fields.
-    
+    Check if the sample contains essential GigaMIDI metadata fields.
+
     Args:
         sample: A dictionary from the GigaMIDI dataset
-        
+
     Returns:
-        True if all expected metadata fields are present, False otherwise
+        True if essential metadata fields are present, False otherwise
     """
     required_fields = [
-        'md5', 'NOMML', 'num_tracks', 'TPQN', 'total_notes',
-        'avg_note_duration', 'avg_velocity', 'min_velocity', 'max_velocity',
-        'tempo', 'loop_track_idx', 'loop_instrument_type', 'loop_start',
-        'loop_end', 'loop_duration_beats', 'loop_note_density', 'Type',
+        'tempo',
+        'title',
+        'artist',
         'instrument_category__drums-only__0__all-instruments-with-drums__1_no-drums__2',
-        'music_styles_curated', 'music_style_scraped', 'music_style_audio_text_Discogs',
-        'music_style_audio_text_Lastfm', 'music_style_audio_text_Tagtraum',
-        'title', 'artist', 'audio_text_matches_score', 'audio_text_matches_sid',
-        'audio_text_matches_mbid', 'MIDI_program_number__expressive_',
-        'instrument_group__expressive_', 'start_tick__expressive_',
-        'end_tick__expressive_', 'duration_beats__expressive_',
-        'note_density__expressive_', 'loopability__expressive_'
+        'music_styles_curated',
+        'music_style_scraped',
+        'music_style_audio_text_Discogs',
+        'music_style_audio_text_Lastfm',
+        'music_style_audio_text_Tagtraum',
     ]
-    
+
     return all(field in sample for field in required_fields)
