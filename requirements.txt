@@ -12,3 +12,5 @@ requests
 datasets
 pretty_midi
 tqdm
+sf2_loader
+fluidsynth
