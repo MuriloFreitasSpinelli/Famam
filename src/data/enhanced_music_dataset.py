@@ -41,6 +41,8 @@ class EnhancedMusicDataset:
     
     #TODO: build vocab inside dataset
 
+    #TODO: add different to_tensdor methods, one for no metadata information, one with only genre, one with only instrument.
+    
     def to_tensorflow_dataset_with_metadata(
         self,
         representation: str = "pianoroll",

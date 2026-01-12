@@ -31,7 +31,7 @@ def save_tensors(
             # Materialize dataset to lists
             data_lists: Dict[str, list] = {}
             for sample in dataset:
-                for key, value in sample.items():
+                for key, value in sample.items(): # type: ignore
                     if key not in data_lists:
                         data_lists[key] = []
                     data_lists[key].append(value.numpy())
@@ -64,7 +64,7 @@ def load_tensors(name: str) -> Dict[str, tf.data.Dataset]:
     with h5py.File(filepath, 'r') as f:
         for split_name in f.keys():
             split_group = f[split_name]
-            data = {key: split_group[key][:] for key in split_group.keys()}
+            data = {key: split_group[key][:] for key in split_group.keys()} # type: ignore
             tf_datasets[split_name] = tf.data.Dataset.from_tensor_slices(data)
 
     print(f"Loaded tensors from: {filepath}")

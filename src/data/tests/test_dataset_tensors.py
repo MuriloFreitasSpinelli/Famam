@@ -46,13 +46,12 @@ def sample_config(tmp_path):
     """Create a sample config for testing."""
     return DataTensorsConfig(
         tensor_name='test_tensors',
+        tensor_type='music-genre',
         representation_type='piano-roll',
-        segmentation_length=100,
         train_split=0.6,
         val_split=0.2,
         test_split=0.2,
         output_dir=str(tmp_path),
-        factory_method_name='test'
     )
 
 
@@ -82,10 +81,10 @@ class TestSaveTensors:
             filepath = save_tensors(sample_tf_datasets, 'test_keys')
             with h5py.File(filepath, 'r') as f:
                 for split in ['train', 'validation', 'test']:
-                    assert 'music' in f[split].keys()
-                    assert 'genre_id' in f[split].keys()
-                    assert 'artist_id' in f[split].keys()
-                    assert 'instrument_ids' in f[split].keys()
+                    assert 'music' in f[split].keys() # type: ignore
+                    assert 'genre_id' in f[split].keys() # type: ignore
+                    assert 'artist_id' in f[split].keys() # type: ignore
+                    assert 'instrument_ids' in f[split].keys() # type: ignore
 
     def test_save_creates_directory(self, sample_tf_datasets, tmp_path):
         """Test that save_tensors creates the tensors directory if needed."""
@@ -136,8 +135,8 @@ class TestLoadTensors:
             original_sample = next(iter(sample_tf_datasets['train']))
             loaded_sample = next(iter(loaded['train']))
 
-            assert original_sample['music'].shape == loaded_sample['music'].shape
-            assert original_sample['instrument_ids'].shape == loaded_sample['instrument_ids'].shape
+            assert original_sample['music'].shape == loaded_sample['music'].shape # type: ignore
+            assert original_sample['instrument_ids'].shape == loaded_sample['instrument_ids'].shape # type: ignore
 
     def test_load_nonexistent_raises_error(self, tmp_path):
         """Test that loading non-existent file raises FileNotFoundError."""
@@ -153,7 +152,7 @@ class TestLoadTensors:
 
             # Get all genre_ids from original and loaded
             original_genres = [s['genre_id'].numpy() for s in sample_tf_datasets['train']]
-            loaded_genres = [s['genre_id'].numpy() for s in loaded['train']]
+            loaded_genres = [s['genre_id'].numpy() for s in loaded['train']] # type: ignore
 
             assert original_genres == loaded_genres
 

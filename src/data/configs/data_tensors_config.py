@@ -9,15 +9,15 @@ class DataTensorsConfig:
     """Configuration for tensor processing with train/val/test splits."""
     
     VALID_REPRESENTATIONS: ClassVar[set[str]] = {'pitch', 'piano-roll', 'event', 'note'}
-    
+    VALID_TENSOR_TYPES: ClassVar[set[str]] = {'music-only', 'music-genre', 'music-instrument', 'full'}
+
     tensor_name: str
+    tensor_type: str
     representation_type: str
-    segmentation_length: int #TODO: Move to preprocessing
     train_split: float
     val_split: float
     test_split: float
     output_dir: str
-    factory_method_name: str #TODO: Remove
      
     def __post_init__(self):
         """Validate configuration parameters."""
@@ -26,6 +26,11 @@ class DataTensorsConfig:
             raise ValueError(
                 f"Invalid representation_type '{self.representation_type}'. "
                 f"Must be one of: {', '.join(sorted(self.VALID_REPRESENTATIONS))}"
+            )
+        if self.tensor_type not in self.VALID_TENSOR_TYPES:
+            raise ValueError(
+                f"Invalid tensor_type '{self.tensor_type}'. "
+                f"Must be one of: {', '.join(sorted(self.VALID_TENSOR_TYPES))}"
             )
         
         # Validate that splits sum to 1.0
