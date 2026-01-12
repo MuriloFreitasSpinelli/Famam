@@ -8,6 +8,7 @@ class EnhancedMusic:
     music: muspy.Music
     metadata: Dict[str, Any]
     
+
     def __getattr__(self, name):
         """Delegate attribute access to the underlying Music object"""
         return getattr(self.music, name)
