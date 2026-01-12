@@ -5,7 +5,7 @@ from typing import ClassVar
 
 
 @dataclass
-class DataTensorsConfig:
+class TensorflowDatasetConfig:
     """Configuration for tensor processing with train/val/test splits."""
     
     VALID_REPRESENTATIONS: ClassVar[set[str]] = {'pitch', 'piano-roll', 'event', 'note'}
@@ -55,7 +55,7 @@ class DataTensorsConfig:
             json.dump(config_dict, f, indent=2)
     
     @classmethod
-    def load(cls, path: str) -> 'DataTensorsConfig':
+    def load(cls, path: str) -> 'TensorflowDatasetConfig':
         """Load configuration from JSON file.
         
         Args:
