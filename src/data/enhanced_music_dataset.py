@@ -40,9 +40,30 @@ class EnhancedMusicDataset:
             self.append(item)
     
     #TODO: build vocab inside dataset
+    def build_vocabulary(self) -> None:
+        """
+        Build vocabulary from all items in the dataset.
+        
+        Iterates through all EnhancedMusic objects and adds unique genres
+        and artists to the vocabulary. Instruments are already predefined
+        in the vocabulary based on General MIDI standard.
+        """
+        # Clear existing genre and artist vocabularies
+        self.vocabulary.genre_to_id.clear()
+        self.vocabulary.artist_to_id.clear()
+        
+        # Loop through all items and build vocabulary
+        for item in self.data:
+            # Add genre if present in metadata
+            if 'genre' in item.metadata and item.metadata['genre']:
+                self.vocabulary.add_genre(item.metadata['genre'])
+            
+            # Add artist if present in metadata
+            if 'artist' in item.metadata and item.metadata['artist']:
+                self.vocabulary.add_artist(item.metadata['artist'])
 
     #TODO: add different to_tensdor methods, one for no metadata information, one with only genre, one with only instrument.
-    
+
     def to_tensorflow_dataset_with_metadata(
         self,
         representation: str = "pianoroll",
