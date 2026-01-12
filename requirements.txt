@@ -12,3 +12,4 @@ requests
 datasets
 pretty_midi
 tqdm
+scikit-optimize
