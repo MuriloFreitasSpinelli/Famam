@@ -6,11 +6,11 @@ import muspy
 from pathlib import Path
 from unittest.mock import patch
 
-from data.dataset_tensors import save_tensors, load_tensors, tensors_exist, TENSORS_DIR
+from data.tensorflow_dataset import save_tensors, load_tensors, tensors_exist, TENSORS_DIR
 from data.enhanced_music import EnhancedMusic
 from data.enhanced_music_dataset import EnhancedMusicDataset
-from data.configs.data_tensors_config import DataTensorsConfig
-from data.scripts.generate_tensors import generate_tensors, get_tensors
+from data.configs.tensorflow_dataset_config import TensorflowDatasetConfig
+from data.scripts.generate_tensorflow_dataset import generate_tensors, get_tensors
 
 
 @pytest.fixture
@@ -44,7 +44,7 @@ def sample_tf_datasets(sample_dataset):
 @pytest.fixture
 def sample_config(tmp_path):
     """Create a sample config for testing."""
-    return DataTensorsConfig(
+    return TensorflowDatasetConfig(
         tensor_name='test_tensors',
         tensor_type='music-genre',
         representation_type='piano-roll',
