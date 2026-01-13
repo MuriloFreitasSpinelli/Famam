@@ -13,6 +13,8 @@ from typing import Dict, Any, Optional
 from dataclasses import dataclass, asdict
 import sys
 
+from src.data.enhanced_music_dataset import EnhancedMusicDataset
+
 script_dir = Path(__file__).resolve().parent
 project_root = script_dir.parent.parent
 sys.path.insert(0, str(project_root))
@@ -37,7 +39,8 @@ class ModelMetadata:
     num_artists: int
     num_instruments: int
     training_config: Dict[str, Any]  # Original TrainingConfig as dict
-
+    tensorflow_dataconfig: Dict[str, Any]
+    enhanced_dataset: EnhancedMusicDataset
 
 class SavedModel:
     """
