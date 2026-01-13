@@ -7,10 +7,10 @@ from tqdm import tqdm
 from data.enhanced_music import EnhancedMusic, midi_to_enchanced_music
 from data.enhanced_music_dataset import EnhancedMusicDataset
 from data.dataset_vocabulary import DatasetVocabulary
-from data.configs.enhanced_dataset_config import EnhancedDatasetConfig
+from data.configs.enhanced_dataset_config import EnhancedDatasetConfig # type: ignore
 
 
-def find_midi_files(input_dirs: List[str], max_samples: Optional[int] = None) -> List[Path]:
+def find_midi_files(input_dirs: List[str], max_samples: Optional[int] = None) -> List[Path]: # type: ignore
     """
     Find all MIDI files in the input directories.
     """
@@ -29,7 +29,7 @@ def find_midi_files(input_dirs: List[str], max_samples: Optional[int] = None) ->
     return midi_files
 
 
-def extract_metadata_from_path(
+def extract_metadata_from_path( # type: ignore
     filepath: Path,
     extract_genre: bool = True,
     extract_artist: bool = True,
@@ -37,6 +37,8 @@ def extract_metadata_from_path(
     artist_level: int = -1
 ) -> Dict[str, str]:
     metadata = {}
+
+    #TODO: Fix metadata, get genre from tsv from fixed path, not found by going back in directory
     parts = filepath.parts
     if extract_genre and len(parts) > abs(genre_level):
         metadata['genre'] = parts[genre_level]
@@ -45,7 +47,7 @@ def extract_metadata_from_path(
     return metadata
 
 
-def passes_filter(music: muspy.Music, config: EnhancedDatasetConfig) -> bool:
+def passes_filter(music: muspy.Music, config: EnhancedDatasetConfig) -> bool: # type: ignore
     num_tracks = len(music.tracks)
     if num_tracks < config.min_tracks or num_tracks > config.max_tracks:
         return False
@@ -72,7 +74,7 @@ def passes_filter(music: muspy.Music, config: EnhancedDatasetConfig) -> bool:
     return True
 
 
-def preprocess_music(music: muspy.Music, config: EnhancedDatasetConfig) -> muspy.Music:
+def preprocess_music(music: muspy.Music, config: EnhancedDatasetConfig) -> muspy.Music: # type: ignore
     if music.resolution != config.resolution:
         music = music.adjust_resolution(config.resolution)
     if config.quantize:
@@ -86,7 +88,7 @@ def preprocess_music(music: muspy.Music, config: EnhancedDatasetConfig) -> muspy
     return music
 
 
-def create_enhanced_dataset(config: EnhancedDatasetConfig) -> EnhancedMusicDataset:
+def create_enhanced_dataset(config: EnhancedDatasetConfig) -> EnhancedMusicDataset: # type: ignore
     if config.random_seed is not None:
         np.random.seed(config.random_seed)
     if config.verbose:
@@ -136,7 +138,7 @@ def create_enhanced_dataset(config: EnhancedDatasetConfig) -> EnhancedMusicDatas
     return dataset
 
 
-def create_and_save_dataset(config: EnhancedDatasetConfig) -> EnhancedMusicDataset:
+def create_and_save_dataset(config: EnhancedDatasetConfig) -> EnhancedMusicDataset: # type: ignore
     dataset = create_enhanced_dataset(config)
     if config.verbose:
         print(f"\nSaving dataset to {config.output_path}...")
