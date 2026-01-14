@@ -4,10 +4,11 @@ import muspy
 import numpy as np
 from tqdm import tqdm
 
+from data.configs.enchanced_dataset_config import EnhancedDatasetConfig
+from data.dataset_vocabulary import DatasetVocabulary
 from data.enhanced_music import EnhancedMusic
 from data.enhanced_music_dataset import EnhancedMusicDataset
-from data.dataset_vocabulary import DatasetVocabulary
-from data.configs.enchanced_dataset_config import EnhancedDatasetConfig  # type: ignore
+
 
 
 def find_midi_files(input_dirs: List[str], max_samples: Optional[int] = None) -> List[Path]:
