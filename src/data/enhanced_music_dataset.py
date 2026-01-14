@@ -7,10 +7,52 @@ import json
 import muspy
 from pathlib import Path
 
-from data.enhanced_music import EnhancedMusic
-from data.dataset_vocabulary import DatasetVocabulary
+from .enhanced_music import EnhancedMusic
+from .dataset_vocabulary import DatasetVocabulary
 
 #TODO: Add the config this was created with as well
+
+# --- FIXED TIME WINDOW (30 seconds) ---
+
+DEFAULT_QPM = 120.0  # reference tempo
+DEFAULT_MAX_SECONDS = 30.0
+
+
+def _max_time_steps_from_seconds(
+    max_seconds: float,
+    resolution: int,
+    qpm: float = DEFAULT_QPM,
+) -> int:
+    # beats per second = qpm / 60
+    beats_per_second = qpm / 60.0
+    ticks_per_second = beats_per_second * resolution
+    return int(max_seconds * ticks_per_second)
+
+
+def _pad_or_truncate_time_axis(
+    music_data: np.ndarray,
+    target_steps: int,
+) -> np.ndarray:
+    """
+    music_data: (128, T)
+    returns:    (128, target_steps)
+    """
+    current = music_data.shape[1]
+
+    if current > target_steps:
+        return music_data[:, :target_steps]
+
+    if current < target_steps:
+        pad = target_steps - current
+        return np.pad(
+            music_data,
+            ((0, 0), (0, pad)),
+            mode="constant",
+            constant_values=0,
+        )
+
+    return music_data
+
 
 @dataclass
 class EnhancedMusicDataset:
@@ -67,39 +109,54 @@ class EnhancedMusicDataset:
         split_filename=None,
         splits=None,
         random_state=None,
+        max_seconds: float = DEFAULT_MAX_SECONDS,
         **kwargs
     ):
-        """
-        Convert dataset to TensorFlow dataset with music data only (no metadata).
-        
-        Each sample contains:
-            'music': float32 array of the musical representation
-        """
         def generator(indices):
             for idx in indices:
                 item: EnhancedMusic = self.data[idx]
 
-                # Check if there are any notes in the music
                 has_notes = any(len(track.notes) > 0 for track in item.music.tracks)
+
                 if has_notes:
-                    music_data = item.music.to_representation(representation, **kwargs)
-                    # Transpose to (128, time_steps) so first dimension is MIDI pitches
-                    music_data = music_data.T
+                    music_data = item.music.to_representation(
+                        representation, **kwargs
+                    ).T
                 else:
-                    # Return empty array with shape (128, 0) for music with no notes
                     music_data = np.zeros((128, 0), dtype=np.float32)
 
+                max_steps = _max_time_steps_from_seconds(
+                    max_seconds=max_seconds,
+                    resolution=item.music.resolution,
+                )
+
+                music_data = _pad_or_truncate_time_axis(music_data, max_steps)
+
                 yield {
-                    'music': music_data.astype(np.float32),
+                    "music": music_data.astype(np.float32),
                 }
-        
-        # Get output signature
-        sample = next(generator([0]))
+
+        # IMPORTANT: static, explicit shape — NEVER infer from a sample
+        max_steps = _max_time_steps_from_seconds(
+            max_seconds=max_seconds,
+            resolution=self.data[0].music.resolution,
+        )
+
         output_signature = {
-            'music': tf.TensorSpec(shape=sample['music'].shape, dtype=tf.float32), # type: ignore
+            "music": tf.TensorSpec(
+                shape=(128, max_steps), # type: ignore
+                dtype=tf.float32, # type: ignore
+            ),
         }
-        
-        return self._create_datasets(generator, output_signature, splits, split_filename, random_state)
+
+        return self._create_datasets(
+            generator,
+            output_signature,
+            splits,
+            split_filename,
+            random_state,
+        )
+
     
     def to_tensorflow_dataset_with_genre(
         self,
@@ -107,6 +164,7 @@ class EnhancedMusicDataset:
         split_filename=None,
         splits=None,
         random_state=None,
+        max_seconds: float = DEFAULT_MAX_SECONDS,
         **kwargs
     ):
         """
@@ -129,21 +187,34 @@ class EnhancedMusicDataset:
                 else:
                     # Return empty array with shape (128, 0) for music with no notes
                     music_data = np.zeros((128, 0), dtype=np.float32)
+                
+
+                max_steps = _max_time_steps_from_seconds(
+                    max_seconds=max_seconds,
+                    resolution=item.music.resolution,
+                )
+
+                music_data = _pad_or_truncate_time_axis(music_data, max_steps)
 
                 yield {
                     'music': music_data.astype(np.float32),
                     'genre_id': np.int32(self.vocabulary.get_genre_id(item.metadata.get('genre', ''))),
                 }
         
-        # Get output signature
-        sample = next(generator([0]))
+        max_steps = _max_time_steps_from_seconds(
+        max_seconds=max_seconds,
+        resolution=self.data[0].music.resolution,
+        )
+
         output_signature = {
-            'music': tf.TensorSpec(shape=sample['music'].shape, dtype=tf.float32), # type: ignore
-            'genre_id': tf.TensorSpec(shape=(), dtype=tf.int32), # type: ignore
+            "music": tf.TensorSpec(shape=(128, max_steps), dtype=tf.float32), # type: ignore
+            "genre_id": tf.TensorSpec(shape=(), dtype=tf.int32), # type: ignore
         }
+
         
         return self._create_datasets(generator, output_signature, splits, split_filename, random_state)
     
+    ##TODO: fix this
     def to_tensorflow_dataset_with_instruments(
         self,
         representation: str = "pianoroll",
@@ -263,15 +334,16 @@ class EnhancedMusicDataset:
         splits=None,
         random_state=None,
         max_tracks: int = 16,
+        max_seconds: float = DEFAULT_MAX_SECONDS,
         **kwargs
     ):
         """
         Convert dataset to TensorFlow dataset with full metadata (genre, artist, instruments).
-        
+
         Each sample contains:
-            'music': float32 array of the musical representation
+            'music': float32 array of the musical representation (128, max_steps)
             'genre_id': int32 genre vocabulary ID
-            'artist_id': int32 artist vocabulary ID  
+            'artist_id': int32 artist vocabulary ID
             'instrument_ids': int32 array[max_tracks] of MIDI program numbers
         """
         def generator(indices):
@@ -288,6 +360,13 @@ class EnhancedMusicDataset:
                     # Return empty array with shape (128, 0) for music with no notes
                     music_data = np.zeros((128, 0), dtype=np.float32)
 
+                # Pad or truncate to fixed time window
+                max_steps = _max_time_steps_from_seconds(
+                    max_seconds=max_seconds,
+                    resolution=item.music.resolution,
+                )
+                music_data = _pad_or_truncate_time_axis(music_data, max_steps)
+
                 instrument_ids = [track.program for track in item.music.tracks]
                 if len(instrument_ids) < max_tracks:
                     instrument_ids.extend([-1] * (max_tracks - len(instrument_ids)))
@@ -300,16 +379,20 @@ class EnhancedMusicDataset:
                     'artist_id': np.int32(self.vocabulary.get_artist_id(item.metadata.get('artist', ''))),
                     'instrument_ids': np.array(instrument_ids, dtype=np.int32),
                 }
-        
-        # Get output signature
-        sample = next(generator([0]))
+
+        # Fixed time window for consistent batching
+        max_steps = _max_time_steps_from_seconds(
+            max_seconds=max_seconds,
+            resolution=self.data[0].music.resolution,
+        )
+
         output_signature = {
-            'music': tf.TensorSpec(shape=sample['music'].shape, dtype=tf.float32), # type: ignore
+            'music': tf.TensorSpec(shape=(128, max_steps), dtype=tf.float32), # type: ignore
             'genre_id': tf.TensorSpec(shape=(), dtype=tf.int32), # type: ignore
-            'artist_id': tf.TensorSpec(shape=(), dtype=tf.int32), # type: ignore 
+            'artist_id': tf.TensorSpec(shape=(), dtype=tf.int32), # type: ignore
             'instrument_ids': tf.TensorSpec(shape=(max_tracks,), dtype=tf.int32), # type: ignore
-        } 
-        
+        }
+
         return self._create_datasets(generator, output_signature, splits, split_filename, random_state)
     def save(self, filepath: str) -> None:
         """

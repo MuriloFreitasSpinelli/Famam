@@ -2,13 +2,21 @@ import tensorflow as tf
 from typing import List
 
 from src.data.dataset_vocabulary import DatasetVocabulary
+from training.saved_model import SavedModel
+import muspy 
 
-
-def generate_music_from_data(savedmodel, data):
+def generate_music_from_data(savedmodel: SavedModel, data):
     outputs = []
     for sample in data:
         prediction = savedmodel(sample, training=False)
         outputs.append(prediction)
+
+
+    output: bytearray
+    representation: str = saved_model.tensorflow_dataset_config.representation_type
+    music = muspy.from_representation(output, str)
+    muspy.Music.write_midi(music, outpath)
+
     return tf.concat(outputs, axis=0)
 
 

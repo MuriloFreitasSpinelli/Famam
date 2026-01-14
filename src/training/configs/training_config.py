@@ -84,6 +84,11 @@ class TrainingConfig:
     l2_reg: float = 0.0
     kernel_constraint_max_value: Optional[float] = None  # Max norm constraint
     recurrent_constraint_max_value: Optional[float] = None
+    use_gradient_clipping: bool = False
+    gradient_clip_value: float = 1.0
+
+    # ============ Performance ============
+    mixed_precision: bool = False  # Use mixed precision training (float16)
     
     # ============ Early Stopping ============
     use_early_stopping: bool = True

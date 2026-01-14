@@ -1,1 +1,1 @@
-These are the scripts to actually run the training etc... should be two types always, for the distributed systems, and for the local systems aka local gpus.
+These are the scripts to actually run the training etc... bash scripts and stuff

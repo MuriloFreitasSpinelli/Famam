@@ -14,7 +14,7 @@ from dataclasses import dataclass, asdict
 import sys
 
 from data.configs.tensorflow_dataset_config import TensorflowDatasetConfig
-from src.data.enhanced_music_dataset import EnhancedMusicDataset
+from data.enhanced_music_dataset import EnhancedMusicDataset
 from training.configs.training_config import TrainingConfig
 
 script_dir = Path(__file__).resolve().parent
@@ -23,8 +23,8 @@ sys.path.insert(0, str(project_root))
 
 import tensorflow as tf
 
-from src.data.dataset_vocabulary import DatasetVocabulary
-from src.training.trainer import DatasetInfo, ConditioningType
+from data.dataset_vocabulary import DatasetVocabulary
+from training.trainer import DatasetInfo, ConditioningType
 
 
 @dataclass
@@ -121,7 +121,7 @@ class SavedModel:
             meta_group.attrs['num_genres'] = self.metadata.num_genres
             meta_group.attrs['num_artists'] = self.metadata.num_artists
             meta_group.attrs['num_instruments'] = self.metadata.num_instruments
-            meta_group.attrs['training_config'] = json.dumps(self.metadata.training_config)
+            meta_group.attrs['training_config'] = json.dumps(asdict(self.metadata.training_config))
             if self.metadata.tensorflow_dataconfig is not None:
                 meta_group.attrs['tensorflow_dataconfig'] = json.dumps(asdict(self.metadata.tensorflow_dataconfig))
 
@@ -248,6 +248,7 @@ class SavedModel:
         Returns:
             Model prediction
         """
+        
         # Build input dict
         inputs = {'music_input': np.expand_dims(music_input, 0)}
 

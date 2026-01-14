@@ -1,0 +1,9 @@
+{
+  "tensor_name": "test_dataset",
+  "tensor_type": "full",
+  "representation_type": "piano-roll",
+  "train_split": 0.8,
+  "val_split": 0.1,
+  "test_split": 0.1,
+  "output_dir": "./models"
+}

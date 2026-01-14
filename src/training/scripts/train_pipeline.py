@@ -26,12 +26,13 @@ from pathlib import Path
 from functools import partial
 
 # Add project root to path
-script_dir = Path(__file__).resolve().parent
-project_root = script_dir.parent
-sys.path.insert(0, str(project_root))
+script_dir = Path(__file__).resolve().parent  # src/training/scripts
+src_root = script_dir.parent.parent  # src (contains data, training modules)
+project_root = src_root.parent  # Famam root (contains data/datasets)
+sys.path.insert(0, str(src_root))
 
 import numpy as np
-from src.data.configs.tensorflow_dataset_config import TensorflowDatasetConfig
+from data.configs.tensorflow_dataset_config import TensorflowDatasetConfig
 
 
 def load_dataset(
@@ -50,8 +51,8 @@ def load_dataset(
     Returns:
         Tuple of (datasets_dict, vocabulary, tf_config)
     """
-    from src.data.tensorflow_dataset import load_tensors, tensors_exist
-    from src.data.enhanced_music_dataset import EnhancedMusicDataset
+    from data.tensorflow_dataset import load_tensors, tensors_exist
+    from data.enhanced_music_dataset import EnhancedMusicDataset
 
     # Create default config if not provided
     if tf_config is None:
@@ -76,7 +77,7 @@ def load_dataset(
             full_dataset = EnhancedMusicDataset.load(str(dataset_path))
             vocabulary = full_dataset.vocabulary
         else:
-            from src.data.dataset_vocabulary import DatasetVocabulary
+            from data.dataset_vocabulary import DatasetVocabulary
             vocabulary = DatasetVocabulary()
             print("Warning: Could not load vocabulary, using empty vocabulary")
 
@@ -142,7 +143,16 @@ def dataset_to_numpy_for_tuning(datasets, max_samples: int = 2000):
 
 
 def create_tf_config(args) -> TensorflowDatasetConfig:
-    """Create TensorflowDatasetConfig from args."""
+    """Create TensorflowDatasetConfig from args or load from JSON file."""
+    # If config file is provided, load from it
+    if hasattr(args, 'config') and args.config:
+        config_path = Path(args.config)
+        if not config_path.exists():
+            raise FileNotFoundError(f"Config file not found: {config_path}")
+        print(f"Loading config from: {config_path}")
+        return TensorflowDatasetConfig.load(str(config_path))
+
+    # Otherwise, create from CLI arguments
     return TensorflowDatasetConfig(
         tensor_name=args.dataset,
         tensor_type=getattr(args, 'tensor_type', 'full'),
@@ -156,8 +166,8 @@ def create_tf_config(args) -> TensorflowDatasetConfig:
 
 def run_tuning(args):
     """Run hyperparameter tuning."""
-    from src.training.configs.training_config import TrainingConfig
-    from src.training.hyperparameter_tuning import (
+    from training.configs.training_config import TrainingConfig
+    from training.hyperparameter_tuning import (
         grid_search_hyperparameters,
         random_search_hyperparameters,
         KerasRegressorWrapper,
@@ -169,7 +179,8 @@ def run_tuning(args):
 
     # Create tf config and load dataset
     tf_config = create_tf_config(args)
-    datasets, vocabulary, tf_config = load_dataset(args.dataset, tf_config)
+    dataset_name = args.dataset if args.dataset else tf_config.tensor_name
+    datasets, vocabulary, tf_config = load_dataset(dataset_name, tf_config)
 
     # Convert to numpy for sklearn
     X, y = dataset_to_numpy_for_tuning(datasets, max_samples=args.max_samples)
@@ -299,8 +310,8 @@ def run_tuning(args):
 
 def run_training(args):
     """Run training with tuned or specified parameters."""
-    from src.training.configs.training_config import TrainingConfig
-    from src.training.trainer import Trainer
+    from training.configs.training_config import TrainingConfig
+    from training.trainer import Trainer
 
     print("\n" + "=" * 70)
     print("MODEL TRAINING")
@@ -309,6 +320,9 @@ def run_training(args):
     # Create tf config
     tf_config = create_tf_config(args)
     print(f"Representation type: {tf_config.representation_type}")
+
+    # Get dataset name from args or config
+    dataset_name = args.dataset if args.dataset else tf_config.tensor_name
 
     # Load config from tuning results or create new
     if args.tuning_results:
@@ -336,7 +350,7 @@ def run_training(args):
     print(config.summary())
 
     # Load dataset with tf_config
-    datasets, vocabulary, tf_config = load_dataset(args.dataset, tf_config)
+    datasets, vocabulary, tf_config = load_dataset(dataset_name, tf_config)
 
     # Train
     trainer = Trainer(config)
@@ -385,7 +399,7 @@ def run_full_pipeline(args):
 
 def list_results(args):
     """List available tuning results."""
-    from src.training.configs.training_config import TrainingConfig
+    from training.configs.training_config import TrainingConfig
 
     print("\n" + "=" * 70)
     print("AVAILABLE TUNING RESULTS")
@@ -411,18 +425,18 @@ def main():
         description='Training Pipeline - Hyperparameter Tuning & Model Training',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Examples:
-  # Run hyperparameter tuning
-  python scripts/train_pipeline.py tune --dataset my_music --experiment lstm_v1
+    Examples:
+    # Run hyperparameter tuning
+    python scripts/train_pipeline.py tune --dataset my_music --experiment lstm_v1
 
-  # Train with tuned parameters
-  python scripts/train_pipeline.py train --dataset my_music --tuning-results lstm_v1 --model-name lstm_v1_final
+    # Train with tuned parameters
+    python scripts/train_pipeline.py train --dataset my_music --tuning-results lstm_v1 --model-name lstm_v1_final
 
-  # Full pipeline (tune + train)
-  python scripts/train_pipeline.py full --dataset my_music --experiment lstm_v1
+    # Full pipeline (tune + train)
+    python scripts/train_pipeline.py full --dataset my_music --experiment lstm_v1
 
-  # List tuning results
-  python scripts/train_pipeline.py list
+    # List tuning results
+    python scripts/train_pipeline.py list
         """
     )
 
@@ -431,6 +445,7 @@ Examples:
     # Common arguments
     common_parser = argparse.ArgumentParser(add_help=False)
     common_parser.add_argument('--dataset', type=str, help='Dataset name (h5 file without extension)')
+    common_parser.add_argument('--config', type=str, help='Path to tensorflow_dataset_config JSON file')
     common_parser.add_argument('--output-dir', type=str, default='./models', help='Output directory')
     common_parser.add_argument('--representation', type=str, default='piano-roll',
                               choices=['piano-roll', 'pitch', 'event', 'note'],
@@ -486,20 +501,20 @@ Examples:
 
     # Run appropriate command
     if args.command == 'tune':
-        if not args.dataset:
-            print("Error: --dataset is required for tuning")
+        if not args.dataset and not args.config:
+            print("Error: --dataset or --config is required for tuning")
             return
         run_tuning(args)
 
     elif args.command == 'train':
-        if not args.dataset:
-            print("Error: --dataset is required for training")
+        if not args.dataset and not args.config:
+            print("Error: --dataset or --config is required for training")
             return
         run_training(args)
 
     elif args.command == 'full':
-        if not args.dataset:
-            print("Error: --dataset is required for full pipeline")
+        if not args.dataset and not args.config:
+            print("Error: --dataset or --config is required for full pipeline")
             return
         run_full_pipeline(args)
 

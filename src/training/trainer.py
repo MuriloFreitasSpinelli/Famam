@@ -20,7 +20,6 @@ project_root = script_dir.parent.parent
 sys.path.insert(0, str(project_root))
 
 import tensorflow as tf
-from keras 
 from tensorflow.keras.models import Model  # type: ignore
 from tensorflow.keras.layers import ( # type: ignore
     Input, LSTM, Bidirectional, Dense, Dropout, Embedding,
@@ -30,7 +29,7 @@ from tensorflow.keras.callbacks import ( # type: ignore
     EarlyStopping, ModelCheckpoint, TensorBoard, ReduceLROnPlateau
 )
 
-from src.training.configs.training_config import TrainingConfig
+from training.configs.training_config import TrainingConfig
 
 
 class ConditioningType(Enum):
@@ -505,7 +504,7 @@ class Trainer:
         if self.model is None or self.dataset_info is None:
             raise ValueError("Train the model first")
 
-        from src.training.saved_model import SavedModel
+        from training.saved_model import SavedModel
         from dataclasses import asdict
 
         saved = SavedModel(
@@ -521,9 +520,9 @@ class Trainer:
 
 
 # Import for type hints
-from src.data.dataset_vocabulary import DatasetVocabulary
-from src.data.configs.tensorflow_dataset_config import TensorflowDatasetConfig
-from src.training.saved_model import SavedModel
+from data.dataset_vocabulary import DatasetVocabulary
+from data.configs.tensorflow_dataset_config import TensorflowDatasetConfig
+from training.saved_model import SavedModel
 
 
 def train_from_datasets(
