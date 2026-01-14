@@ -314,62 +314,64 @@ class EnhancedMusicDataset:
     def save(self, filepath: str) -> None:
         """
         Save dataset to HDF5 file.
-        
+
         Args:
             filepath: Path to save the .h5 file
         """
+        import pickle
+
         filepath = Path(filepath) # type: ignore
         filepath.parent.mkdir(parents=True, exist_ok=True) # type: ignore
-        
+
         with h5py.File(filepath, 'w') as f:
             # Save vocabulary
             vocab_group = f.create_group('vocabulary')
             vocab_group.attrs['genre_to_id'] = json.dumps(self.vocabulary.genre_to_id)
             vocab_group.attrs['artist_to_id'] = json.dumps(self.vocabulary.artist_to_id)
-            
+
             # Save each EnhancedMusic item
             data_group = f.create_group('data')
             for idx, item in enumerate(self.data):
                 item_group = data_group.create_group(str(idx))
-                
-                # Save the Music object as bytes (pickled)
-                import pickle
-                item_group.attrs['music_pickle'] = np.void(pickle.dumps(item.music))
-                
-                # Save metadata
+
+                # Save the Music object as bytes (pickled) - use dataset instead of attr for large data
+                pickled_data = np.frombuffer(pickle.dumps(item.music), dtype=np.uint8)
+                item_group.create_dataset('music_pickle', data=pickled_data)
+
+                # Save metadata as attribute (small enough)
                 item_group.attrs['metadata'] = json.dumps(item.metadata)
 
     @staticmethod
     def load(filepath: str) -> 'EnhancedMusicDataset':
         """
         Load dataset from HDF5 file.
-        
+
         Args:
             filepath: Path to the .h5 file
-            
+
         Returns:
             EnhancedMusicDataset instance
         """
         import pickle
-        
+
         with h5py.File(filepath, 'r') as f:
             # Load vocabulary
             vocab = DatasetVocabulary()
             vocab.genre_to_id = json.loads(f['vocabulary'].attrs['genre_to_id']) # type: ignore
             vocab.artist_to_id = json.loads(f['vocabulary'].attrs['artist_to_id']) # type: ignore
-            
+
             # Load data
             data = []
             data_group = f['data']
             for idx in sorted(data_group.keys(), key=int): # type: ignore
                 item_group = data_group[idx] # type: ignore
-                
-                # Unpickle Music object
-                music = pickle.loads(item_group.attrs['music_pickle'].tobytes()) # type: ignore
-                
+
+                # Unpickle Music object from dataset
+                music = pickle.loads(item_group['music_pickle'][:].tobytes()) # type: ignore
+
                 # Load metadata
                 metadata = json.loads(item_group.attrs['metadata']) # type: ignore
-                
+
                 data.append(EnhancedMusic(music=music, metadata=metadata))
-        
+
         return EnhancedMusicDataset(data=data, vocabulary=vocab)

@@ -1,0 +1,3 @@
+data/core_datasets/clean_midi/
+__pycache__/
+*.pyc
