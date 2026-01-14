@@ -19,16 +19,16 @@ class EnhancedDatasetConfig:
     allowed_instruments: Optional[List[str]] = None  # Filter by instrument names (MIDI program names)
     excluded_instruments: Optional[List[str]] = None  # Exclude specific instruments
     min_tracks: int = 1  # Minimum number of tracks
-    max_tracks: int = 16  # Maximum number of tracks
+    max_tracks: int = 128  # Maximum number of tracks
     min_notes: int = 10  # Minimum total notes in the piece
     min_duration: Optional[float] = None  # Minimum duration in seconds
     max_duration: Optional[float] = None  # Maximum duration in seconds
     
     # Metadata extraction
-    extract_genre_from_path: bool = True  # Extract genre from folder structure
+    extract_genre_from_path: bool = True  # Extract genre from TSV file
     extract_artist_from_path: bool = True  # Extract artist from folder structure
-    genre_folder_level: int = -2  # Which folder level contains genre (negative = from end)
-    artist_folder_level: int = -1  # Which folder level contains artist (negative = from end)
+    genre_tsv_path: Optional[str] = None  # Path to genre.tsv file for genre lookup
+    artist_folder_level: int = -2  # Which folder level contains artist (negative = from end, -2 = parent folder)
     
     # Preprocessing options
     resolution: int = 24  # Ticks per quarter note
