@@ -13,7 +13,9 @@ from typing import Dict, Any, Optional
 from dataclasses import dataclass, asdict
 import sys
 
+from data.configs.tensorflow_dataset_config import TensorflowDatasetConfig
 from src.data.enhanced_music_dataset import EnhancedMusicDataset
+from training.configs.training_config import TrainingConfig
 
 script_dir = Path(__file__).resolve().parent
 project_root = script_dir.parent.parent
@@ -38,9 +40,9 @@ class ModelMetadata:
     num_genres: int
     num_artists: int
     num_instruments: int
-    training_config: Dict[str, Any]  # Original TrainingConfig as dict
-    tensorflow_dataconfig: Dict[str, Any]
-    enhanced_dataset: EnhancedMusicDataset
+    training_config: TrainingConfig
+    tensorflow_dataconfig: Optional[TensorflowDatasetConfig] = None
+    enhanced_dataset: Optional[EnhancedMusicDataset] = None
 
 class SavedModel:
     """
@@ -58,7 +60,9 @@ class SavedModel:
         model: tf.keras.Model, # type: ignore
         vocabulary: DatasetVocabulary,
         dataset_info: DatasetInfo,
-        training_config: Dict[str, Any],
+        training_config: TrainingConfig,
+        tensorflow_dataconfig: Optional[TensorflowDatasetConfig] = None,
+        enhanced_dataset: Optional[EnhancedMusicDataset] = None,
         model_name: str = "music_generator",
     ):
         self.model = model
@@ -80,6 +84,8 @@ class SavedModel:
             num_artists=vocabulary.num_artists,
             num_instruments=vocabulary.num_instruments,
             training_config=training_config,
+            tensorflow_dataconfig=tensorflow_dataconfig,
+            enhanced_dataset=enhanced_dataset
         )
 
     def save(self, filepath: str) -> None:
@@ -116,6 +122,8 @@ class SavedModel:
             meta_group.attrs['num_artists'] = self.metadata.num_artists
             meta_group.attrs['num_instruments'] = self.metadata.num_instruments
             meta_group.attrs['training_config'] = json.dumps(self.metadata.training_config)
+            if self.metadata.tensorflow_dataconfig is not None:
+                meta_group.attrs['tensorflow_dataconfig'] = json.dumps(asdict(self.metadata.tensorflow_dataconfig))
 
             # === Save model path reference ===
             # Store the keras model file path (saved separately)
@@ -159,7 +167,14 @@ class SavedModel:
             conditioning_type = ConditioningType[meta.attrs['conditioning_type']] # type: ignore
             music_shape = tuple(json.loads(meta.attrs['music_shape'])) # type: ignore
             training_config = json.loads(meta.attrs['training_config']) # type: ignore
- 
+
+            # Load tensorflow_dataconfig if present
+            if 'tensorflow_dataconfig' in meta.attrs:
+                tf_config_dict = json.loads(meta.attrs['tensorflow_dataconfig']) # type: ignore
+                tensorflow_dataconfig = TensorflowDatasetConfig(**tf_config_dict)
+            else:
+                tensorflow_dataconfig = None
+
             dataset_info = DatasetInfo(
                 music_shape=music_shape,
                 conditioning_type=conditioning_type,
@@ -179,12 +194,16 @@ class SavedModel:
             vocabulary=vocab,
             dataset_info=dataset_info,
             training_config=training_config,
+            tensorflow_dataconfig=tensorflow_dataconfig,
+            enhanced_dataset=None,  # Not stored in bundle, load separately if needed
             model_name=model_name, # type: ignore
         )
 
         print(f"Loaded model bundle from: {filepath}")
         print(f"  - Vocabulary: {vocab.num_genres} genres, {vocab.num_artists} artists")
         print(f"  - Conditioning: {conditioning_type.name}")
+        if tensorflow_dataconfig:
+            print(f"  - Representation: {tensorflow_dataconfig.representation_type}")
 
         return saved_model
 

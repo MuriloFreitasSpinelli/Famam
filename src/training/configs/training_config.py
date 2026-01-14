@@ -36,6 +36,7 @@ class TrainingConfig:
     # ============ Training Hyperparameters ============
     batch_size: int = 32
     epochs: int = 100
+    shuffle: bool = True  # Shuffle training data each epoch
     optimizer: str = 'adam'
     learning_rate: float = 0.001
     loss_function: str = 'mse'
@@ -99,19 +100,6 @@ class TrainingConfig:
     save_best_only: bool = True
     save_weights_only: bool = False
     
-    # ============ Data Processing ============
-    validation_split: float = 0.0  # Use if not using separate validation set
-    shuffle: bool = True
-    class_weight: Optional[Dict[int, float]] = None
-    sample_weight: Optional[str] = None  # Path to sample weights
-    
-    # ============ Advanced Training Techniques ============
-    use_gradient_clipping: bool = False
-    gradient_clip_value: Optional[float] = None
-    gradient_clip_norm: Optional[float] = None
-    
-    mixed_precision: bool = False  # For faster training on supported hardware
-    
     # TensorBoard logging
     use_tensorboard: bool = True
     tensorboard_log_dir: str = './logs'
@@ -125,7 +113,7 @@ class TrainingConfig:
     cv_shuffle: bool = True
     cv_random_state: Optional[int] = 42
     
-    # ============ Hyperparameter Tuning (Sklearn-style) ============
+    # ============ Hyperparameter Tuning (Scikit-learn) ============
     use_hyperparameter_tuning: bool = False
     tuning_method: str = 'grid_search'  # 'grid_search', 'random_search', 'bayesian'
     
@@ -303,7 +291,141 @@ class TrainingConfig:
             config_dict = json.load(f)
         
         return cls(**config_dict)
-    
+
+    def save_tuning_results(self, search_cv, experiment_name: str) -> str:
+        """
+        Save hyperparameter tuning results to JSON file.
+
+        Args:
+            search_cv: Fitted GridSearchCV, RandomizedSearchCV, or BayesSearchCV object
+            experiment_name: Name for this tuning experiment
+
+        Returns:
+            Path to the saved results file
+        """
+        results_path = Path(self.output_dir) / 'tuning' / f'{experiment_name}.json'
+        results_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Extract results from the search object
+        results = {
+            'experiment_name': experiment_name,
+            'tuning_method': self.tuning_method,
+            'best_params': search_cv.best_params_,
+            'best_score': float(search_cv.best_score_),
+            'cv_folds': self.tuning_cv_folds,
+            'scoring': self.tuning_scoring,
+            'cv_results': {
+                'mean_test_score': [float(x) for x in search_cv.cv_results_['mean_test_score']],
+                'std_test_score': [float(x) for x in search_cv.cv_results_['std_test_score']],
+                'mean_train_score': [float(x) for x in search_cv.cv_results_.get('mean_train_score', [])],
+                'params': [
+                    {k: v.tolist() if hasattr(v, 'tolist') else v for k, v in p.items()}
+                    for p in search_cv.cv_results_['params']
+                ],
+                'rank_test_score': [int(x) for x in search_cv.cv_results_['rank_test_score']],
+            },
+            'base_config': {
+                'epochs': self.epochs,
+                'loss_function': self.loss_function,
+                'metrics': self.metrics,
+            }
+        }
+
+        with open(results_path, 'w') as f:
+            json.dump(results, f, indent=2, default=str)
+
+        print(f"Tuning results saved to: {results_path}")
+        return str(results_path)
+
+    @classmethod
+    def from_tuning_results(
+        cls,
+        results_path: str,
+        model_name: str,
+        **overrides
+    ) -> 'TrainingConfig':
+        """
+        Create a TrainingConfig using best parameters from tuning results.
+
+        Args:
+            results_path: Path to the tuning results JSON file
+            model_name: Name for the new model
+            **overrides: Additional parameters to override (e.g., epochs=200)
+
+        Returns:
+            TrainingConfig instance with best tuned parameters
+        """
+        with open(results_path, 'r') as f:
+            results = json.load(f)
+
+        best = results['best_params']
+        base = results.get('base_config', {})
+
+        # Map tuning params to config params
+        config_kwargs = {
+            'model_name': model_name,
+            # From best params (tuned)
+            'lstm_units': best.get('lstm_units', [128, 64]),
+            'dense_units': best.get('dense_units', [64, 32]),
+            'dropout_rate': best.get('dropout_rate', 0.2),
+            'recurrent_dropout': best.get('recurrent_dropout', 0.1),
+            'learning_rate': best.get('learning_rate', 0.001),
+            'batch_size': best.get('batch_size', 32),
+            'optimizer': best.get('optimizer', 'adam'),
+            'bidirectional': best.get('bidirectional', False),
+            'l1_reg': best.get('l1_reg', 0.0),
+            'l2_reg': best.get('l2_reg', 0.0),
+            # From base config (preserved from tuning)
+            'epochs': base.get('epochs', 100),
+            'loss_function': base.get('loss_function', 'mse'),
+            'metrics': base.get('metrics', ['mae']),
+            # Disable tuning for final training
+            'use_hyperparameter_tuning': False,
+        }
+
+        # Apply any overrides
+        config_kwargs.update(overrides)
+
+        config = cls(**config_kwargs)
+
+        print(f"Created config from tuning results:")
+        print(f"  Source: {results_path}")
+        print(f"  Best score: {results['best_score']:.4f}")
+        print(f"  Best params: {best}")
+
+        return config
+
+    @staticmethod
+    def list_tuning_results(output_dir: str = './models') -> List[Dict[str, Any]]:
+        """
+        List all saved tuning results.
+
+        Args:
+            output_dir: Base output directory
+
+        Returns:
+            List of tuning result summaries
+        """
+        tuning_dir = Path(output_dir) / 'tuning'
+        if not tuning_dir.exists():
+            return []
+
+        results = []
+        for path in tuning_dir.glob('*.json'):
+            with open(path, 'r') as f:
+                data = json.load(f)
+            results.append({
+                'path': str(path),
+                'experiment_name': data.get('experiment_name', path.stem),
+                'best_score': data.get('best_score'),
+                'best_params': data.get('best_params'),
+                'tuning_method': data.get('tuning_method'),
+            })
+
+        # Sort by best score (descending for negative scores like neg_mse)
+        results.sort(key=lambda x: x.get('best_score', float('-inf')), reverse=True)
+        return results
+
     def summary(self) -> str:
         """Generate a human-readable summary of the configuration."""
         summary_lines = [
@@ -329,13 +451,13 @@ class TrainingConfig:
             "",
             "Regularization:",
             f"  L1: {self.l1_reg}, L2: {self.l2_reg}",
-            f"  Gradient Clipping: {self.use_gradient_clipping}",
+            f"  Gradient Clipping: {self.use_gradient_clipping}", # type: ignore
             "",
             "Training Techniques:",
             f"  Early Stopping: {self.use_early_stopping} (patience={self.early_stopping_patience})",
             f"  Checkpointing: {self.use_checkpointing}",
             f"  Learning Rate Schedule: {self.lr_schedule}",
-            f"  Mixed Precision: {self.mixed_precision}",
+            f"  Mixed Precision: {self.mixed_precision}", # type: ignore
             "",
         ]
         

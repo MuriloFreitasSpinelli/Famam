@@ -489,6 +489,7 @@ class Trainer:
         self,
         filepath: str,
         vocabulary: "DatasetVocabulary",
+        tensorflow_dataconfig: Optional["TensorflowDatasetConfig"] = None,
     ) -> "SavedModel":
         """
         Save the model bundled with vocabulary for generation.
@@ -496,6 +497,7 @@ class Trainer:
         Args:
             filepath: Path to save the .h5 bundle
             vocabulary: DatasetVocabulary from the training dataset
+            tensorflow_dataconfig: Optional config with representation type info
 
         Returns:
             SavedModel instance
@@ -510,7 +512,8 @@ class Trainer:
             model=self.model,
             vocabulary=vocabulary,
             dataset_info=self.dataset_info,
-            training_config=asdict(self.config),
+            training_config=self.config,
+            tensorflow_dataconfig=tensorflow_dataconfig,
             model_name=self.config.model_name,
         )
         saved.save(filepath)
@@ -519,6 +522,7 @@ class Trainer:
 
 # Import for type hints
 from src.data.dataset_vocabulary import DatasetVocabulary
+from src.data.configs.tensorflow_dataset_config import TensorflowDatasetConfig
 from src.training.saved_model import SavedModel
 
 
