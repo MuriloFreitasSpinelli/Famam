@@ -1,1 +1,0 @@
-"""Source package for the Famam music generation project."""

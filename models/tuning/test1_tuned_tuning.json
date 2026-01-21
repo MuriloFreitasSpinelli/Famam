@@ -1,0 +1,99 @@
+{
+  "experiment_name": "test1_tuned_tuning",
+  "tuning_method": "random_search",
+  "best_params": {
+    "lstm_units": [
+      128
+    ],
+    "learning_rate": 0.001,
+    "dropout_rate": 0.2,
+    "dense_units": [
+      32
+    ]
+  },
+  "best_score": -34.56015205383301,
+  "cv_folds": 2,
+  "scoring": "neg_mean_squared_error",
+  "cv_results": {
+    "mean_test_score": [
+      -34.56464385986328,
+      -34.56015205383301,
+      -34.56241035461426,
+      -34.56970024108887,
+      -34.573076248168945
+    ],
+    "std_test_score": [
+      0.925445556640625,
+      0.9335575103759766,
+      0.9275417327880859,
+      0.9215297698974609,
+      0.9210643768310547
+    ],
+    "mean_train_score": [
+      -34.52133750915527,
+      -34.51930236816406,
+      -34.520713806152344,
+      -34.53764343261719,
+      -34.54477882385254
+    ],
+    "params": [
+      {
+        "lstm_units": [
+          64
+        ],
+        "learning_rate": 0.001,
+        "dropout_rate": 0.2,
+        "dense_units": [
+          32
+        ]
+      },
+      {
+        "lstm_units": [
+          128
+        ],
+        "learning_rate": 0.001,
+        "dropout_rate": 0.2,
+        "dense_units": [
+          32
+        ]
+      },
+      {
+        "lstm_units": [
+          128
+        ],
+        "learning_rate": 0.001,
+        "dropout_rate": 0.3,
+        "dense_units": [
+          32
+        ]
+      },
+      {
+        "lstm_units": [
+          64
+        ],
+        "learning_rate": 0.01,
+        "dropout_rate": 0.3,
+        "dense_units": [
+          64
+        ]
+      },
+      {
+        "lstm_units": [
+          128
+        ],
+        "learning_rate": 0.001,
+        "dropout_rate": 0.3,
+        "dense_units": [
+          64
+        ]
+      }
+    ],
+    "rank_test_score": [
+      3,
+      1,
+      2,
+      4,
+      5
+    ]
+  }
+}

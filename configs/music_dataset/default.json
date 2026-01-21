@@ -1,0 +1,17 @@
+{
+  "name": "default_dataset",
+  "input_dirs": ["data/midi/clean_midi"],
+  "output_path": "data/datasets/default_dataset.h5",
+  "genre_tsv_path": "data/midi/clean_midi/genre.tsv",
+  "allowed_genres": null,
+  "min_tracks": 1,
+  "max_tracks": 64,
+  "min_notes_per_track": 1,
+  "min_duration_seconds": null,
+  "max_duration_seconds": null,
+  "resolution": 24,
+  "max_time_steps": 1000,
+  "max_samples": 100,
+  "random_seed": null,
+  "verbose": true
+}

@@ -1,0 +1,28 @@
+{
+  "target_resolution": 24,
+  "quantize": true,
+  "quantize_grid": 1,
+  "remove_empty_tracks": true,
+  "segment_length": null,
+  "max_padding_ratio": 0.7,
+  "enable_transposition": false,
+  "transposition_semitones": [
+    -5,
+    -4,
+    -3,
+    -2,
+    -1,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6
+  ],
+  "enable_tempo_variation": false,
+  "tempo_variation_range": [
+    0.9,
+    1.1
+  ],
+  "tempo_variation_steps": 3
+}

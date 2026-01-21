@@ -1,1 +1,0 @@
-These are the scripts to actually run the training etc... bash scripts and stuff
