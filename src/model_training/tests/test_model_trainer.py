@@ -145,14 +145,22 @@ class TestBuildLstmModel:
             input_shape=input_shape,
             num_genres=3,
             config=small_config,
+            num_instruments=129,
         )
         model.compile(optimizer='adam', loss='mse')
 
-        # Create dummy input
+        # Create dummy input (model now requires 4 inputs)
         pianoroll = np.random.rand(1, 16, 10).astype(np.float32)
         genre_id = np.array([[1]], dtype=np.int32)
+        instrument_id = np.array([[0]], dtype=np.int32)
+        drum_input = np.zeros((1, 16, 10), dtype=np.float32)
 
-        output = model.predict({'pianoroll_input': pianoroll, 'genre_input': genre_id}, verbose=0)
+        output = model.predict({
+            'pianoroll_input': pianoroll,
+            'genre_input': genre_id,
+            'instrument_input': instrument_id,
+            'drum_input': drum_input,
+        }, verbose=0)
         assert output.shape == (1, 16, 10)
 
 

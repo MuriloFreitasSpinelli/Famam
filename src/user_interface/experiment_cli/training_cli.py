@@ -6,6 +6,8 @@ import json
 
 from src.core import MusicDataset, Vocabulary
 from src.model_training import ModelTrainingConfig, ModelTrainer, train_from_music_dataset
+from src.model_training.configs.slurm_config import SlurmConfig
+from src.model_training.slurm_generator import SlurmScriptGenerator
 from src.model_tuning import ModelTuningConfig, tune_from_music_dataset
 
 from .prompts import (
@@ -29,8 +31,11 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent.parent.resolve()
 CONFIGS_DIR = PROJECT_ROOT / "configs"
 TRAINING_CONFIG_DIR = CONFIGS_DIR / "model_training"
 TUNING_CONFIG_DIR = CONFIGS_DIR / "model_tuning"
+SLURM_CONFIG_DIR = CONFIGS_DIR / "slurm"
 DATASET_DIR = PROJECT_ROOT / "data" / "datasets"
 MODELS_DIR = PROJECT_ROOT / "models"
+SLURM_JOBS_DIR = PROJECT_ROOT / "slurm_jobs"
+SLURM_LOGS_DIR = PROJECT_ROOT / "slurm_logs"
 
 
 def ensure_config_dirs():
@@ -322,6 +327,343 @@ def select_dataset() -> Optional[MusicDataset]:
     return dataset
 
 
+def prompt_distribution_config() -> Tuple[str, Optional[int]]:
+    """
+    Prompt for distribution strategy configuration.
+
+    Returns:
+        Tuple of (strategy_name, batch_size_per_replica)
+    """
+    print_header("Distribution Strategy")
+
+    strategies = [
+        ("None (single GPU)", "none"),
+        ("MirroredStrategy (multi-GPU, single node)", "mirrored"),
+        ("MultiWorkerMirroredStrategy (multi-node)", "multi_worker_mirrored"),
+    ]
+
+    print("Select distribution strategy:")
+    for i, (desc, _) in enumerate(strategies, 1):
+        print(f"  [{i}] {desc}")
+    print()
+
+    choice = get_choice(len(strategies))
+    strategy = strategies[choice - 1][1]
+
+    batch_size_per_replica = None
+    if strategy != 'none':
+        if get_bool("Set batch size per replica?", default=False):
+            batch_size_per_replica = get_int("Batch size per replica", default=32, min_val=1)
+
+    return strategy, batch_size_per_replica
+
+
+def prompt_slurm_config() -> SlurmConfig:
+    """Interactively create a SlurmConfig."""
+    print_header("SLURM Job Configuration")
+
+    print("Job identification:")
+    print("-" * 40)
+    job_name = get_input("Job name", default="famam_train")
+
+    print("\nGPU partition:")
+    partitions = [
+        ("gpu_h100 (NVIDIA H100, high performance)", "gpu_h100"),
+        ("gpu_a100_il (NVIDIA A100, general purpose)", "gpu_a100_il"),
+        ("gpu_a100_short (NVIDIA A100, max 30 min)", "gpu_a100_short"),
+    ]
+    for i, (desc, _) in enumerate(partitions, 1):
+        print(f"  [{i}] {desc}")
+    print()
+    part_choice = get_choice(len(partitions))
+    partition = partitions[part_choice - 1][1]
+
+    print("\nResource allocation:")
+    print("-" * 40)
+    nodes = get_int("Number of nodes", default=1, min_val=1)
+    gpus_per_node = get_int("GPUs per node", default=1, min_val=1, max_val=8)
+
+    # Auto-calculate recommended CPUs and memory
+    recommended_cpus = gpus_per_node * 8
+    recommended_memory = gpus_per_node * 32
+
+    cpus_per_task = get_int(f"CPUs per task (recommended: {recommended_cpus})",
+                           default=recommended_cpus, min_val=1)
+    memory_gb = get_int(f"Memory in GB (recommended: {recommended_memory})",
+                       default=recommended_memory, min_val=1)
+
+    print("\nTime limit:")
+    print("-" * 40)
+    if partition == 'gpu_a100_short':
+        print("Note: gpu_a100_short has a 30-minute time limit")
+        time_limit = get_input("Time limit (HH:MM:SS)", default="00:30:00")
+    else:
+        time_limit = get_input("Time limit (HH:MM:SS)", default="24:00:00")
+
+    print("\nEnvironment:")
+    print("-" * 40)
+    conda_env = get_input("Conda environment name (leave empty to skip)", default="")
+    if not conda_env:
+        conda_env = None
+
+    # Module loads
+    default_modules = "devel/cuda/12.1,devel/python/3.11"
+    modules_str = get_input("Modules to load (comma-separated)", default=default_modules)
+    module_loads = [m.strip() for m in modules_str.split(",") if m.strip()]
+
+    # Email notifications
+    email = None
+    if get_bool("Enable email notifications?", default=False):
+        email = get_input("Email address")
+
+    config = SlurmConfig(
+        job_name=job_name,
+        partition=partition,
+        nodes=nodes,
+        gpus_per_node=gpus_per_node,
+        cpus_per_task=cpus_per_task,
+        memory_gb=memory_gb,
+        time_limit=time_limit,
+        conda_env=conda_env,
+        module_loads=module_loads,
+        email=email,
+        output_dir=str(SLURM_JOBS_DIR),
+        log_dir=str(SLURM_LOGS_DIR),
+    )
+
+    # Save config
+    SLURM_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    save_path = SLURM_CONFIG_DIR / f"{job_name}.json"
+    config.save(str(save_path))
+    print(f"\nSLURM configuration saved to: {save_path}")
+
+    return config
+
+
+def run_distributed_training():
+    """Run distributed training with strategy selection."""
+    print_header("Distributed Training")
+
+    # Select dataset
+    dataset = select_dataset()
+    if dataset is None:
+        return
+
+    # Get training config
+    training_config = get_training_config()
+    if training_config is None:
+        print("Training cancelled.")
+        return
+
+    # Get distribution config
+    strategy, batch_size_per_replica = prompt_distribution_config()
+
+    # Update config with distribution settings
+    training_config.distribution_strategy = strategy
+    if batch_size_per_replica:
+        training_config.batch_size_per_replica = batch_size_per_replica
+
+    # Confirm
+    print_header("Distributed Training Summary")
+    print(f"Model: {training_config.model_name}")
+    print(f"Dataset: {len(dataset)} entries, {dataset.count_tracks()} tracks")
+    print(f"Strategy: {strategy}")
+    print(f"LSTM units: {training_config.lstm_units}")
+    print(f"Epochs: {training_config.epochs}")
+    if batch_size_per_replica:
+        print(f"Batch size per replica: {batch_size_per_replica}")
+    else:
+        print(f"Batch size: {training_config.batch_size}")
+    print()
+
+    if not confirm("Start distributed training?", default=True):
+        print("Training cancelled.")
+        return
+
+    # Split dataset
+    print("\nSplitting dataset...")
+    splits = (0.8, 0.1, 0.1)
+    datasets = dataset.to_tensorflow_dataset(splits=splits, random_state=42)
+
+    # Run training
+    print("\n" + "=" * 60)
+    print(f"Starting distributed training with {strategy}...")
+    print("=" * 60 + "\n")
+
+    try:
+        model, history, trainer = train_from_music_dataset(
+            datasets=datasets,
+            config=training_config,
+            vocabulary=dataset.vocabulary,
+        )
+
+        print("\n" + "=" * 60)
+        print("Training complete!")
+        print("=" * 60)
+
+        # Save model bundle
+        if confirm("\nSave model bundle for generation?", default=True):
+            bundle_path = MODELS_DIR / training_config.model_name / "model_bundle"
+            trainer.save_bundle(str(bundle_path), dataset.vocabulary)
+            print(f"Model bundle saved to: {bundle_path}.h5")
+
+    except Exception as e:
+        print(f"\nError during training: {e}")
+        raise
+
+    input("\nPress Enter to continue...")
+
+
+def run_slurm_generator():
+    """Generate SLURM job scripts for cluster execution."""
+    print_header("SLURM Script Generator")
+
+    options = [
+        "Generate training script",
+        "Generate tuning script",
+        "Back",
+    ]
+    print_menu(options)
+    choice = get_choice(len(options))
+
+    if choice == 3:
+        return
+
+    # Get SLURM config
+    print("\n--- SLURM Configuration ---")
+    slurm_options = [
+        "Load existing SLURM config",
+        "Create new SLURM config",
+    ]
+    print_menu(slurm_options)
+    slurm_choice = get_choice(len(slurm_options))
+
+    if slurm_choice == 1:
+        SLURM_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        config_path = select_config_file(SLURM_CONFIG_DIR, "SLURM")
+        if config_path:
+            slurm_config = SlurmConfig.load(str(config_path))
+        else:
+            print("No config selected, using defaults.")
+            slurm_config = prompt_slurm_config()
+    else:
+        slurm_config = prompt_slurm_config()
+
+    generator = SlurmScriptGenerator(slurm_config)
+
+    if choice == 1:
+        # Generate training script
+        _generate_training_slurm_script(generator, slurm_config)
+    elif choice == 2:
+        # Generate tuning script
+        _generate_tuning_slurm_script(generator, slurm_config)
+
+
+def _generate_training_slurm_script(generator: SlurmScriptGenerator, slurm_config: SlurmConfig):
+    """Generate a training SLURM script."""
+    print("\n--- Training Configuration ---")
+
+    # Select training config
+    config_path = select_config_file(TRAINING_CONFIG_DIR, "training")
+    if config_path is None:
+        print("No training config selected.")
+        return
+
+    # Select dataset
+    dataset_files = list(DATASET_DIR.glob("*.h5"))
+    if not dataset_files:
+        print(f"No datasets found in {DATASET_DIR}")
+        return
+
+    print("\nAvailable datasets:")
+    for i, f in enumerate(dataset_files, 1):
+        print(f"  [{i}] {f.name}")
+    print()
+    ds_choice = get_choice(len(dataset_files))
+    dataset_path = dataset_files[ds_choice - 1]
+
+    # Distribution strategy
+    strategies = ["none", "mirrored", "multi_worker_mirrored"]
+    print("\nDistribution strategy:")
+    for i, s in enumerate(strategies, 1):
+        print(f"  [{i}] {s}")
+    print()
+
+    # Default strategy based on config
+    default_strategy = 1
+    if slurm_config.nodes > 1:
+        default_strategy = 3
+    elif slurm_config.gpus_per_node > 1:
+        default_strategy = 2
+
+    strat_choice = get_choice(len(strategies), f"Select strategy [{default_strategy}]: ")
+    strategy = strategies[strat_choice - 1] if strat_choice else strategies[default_strategy - 1]
+
+    # Generate script
+    print("\n" + "=" * 60)
+    script_path = generator.save_training_script(
+        config_path=str(config_path),
+        dataset_path=str(dataset_path),
+        strategy=strategy,
+        project_dir=str(PROJECT_ROOT),
+    )
+
+    print("\nScript generated successfully!")
+    print(f"To submit: sbatch {script_path}")
+    print("=" * 60)
+
+    input("\nPress Enter to continue...")
+
+
+def _generate_tuning_slurm_script(generator: SlurmScriptGenerator, slurm_config: SlurmConfig):
+    """Generate a tuning SLURM script."""
+    print("\n--- Tuning Configuration ---")
+
+    # Select tuning config
+    tuning_config_path = select_config_file(TUNING_CONFIG_DIR, "tuning")
+    if tuning_config_path is None:
+        print("No tuning config selected.")
+        return
+
+    # Select training config (base for tuning)
+    print("\nSelect base training config:")
+    training_config_path = select_config_file(TRAINING_CONFIG_DIR, "training")
+    if training_config_path is None:
+        print("No training config selected.")
+        return
+
+    # Select dataset
+    dataset_files = list(DATASET_DIR.glob("*.h5"))
+    if not dataset_files:
+        print(f"No datasets found in {DATASET_DIR}")
+        return
+
+    print("\nAvailable datasets:")
+    for i, f in enumerate(dataset_files, 1):
+        print(f"  [{i}] {f.name}")
+    print()
+    ds_choice = get_choice(len(dataset_files))
+    dataset_path = dataset_files[ds_choice - 1]
+
+    max_samples = get_int("Max samples for tuning", default=1000, min_val=100)
+
+    # Generate script
+    print("\n" + "=" * 60)
+    script_path = generator.save_tuning_script(
+        tuning_config_path=str(tuning_config_path),
+        training_config_path=str(training_config_path),
+        dataset_path=str(dataset_path),
+        max_samples=max_samples,
+        project_dir=str(PROJECT_ROOT),
+    )
+
+    print("\nScript generated successfully!")
+    print(f"To submit: sbatch {script_path}")
+    print("=" * 60)
+
+    input("\nPress Enter to continue...")
+
+
 def run_tuning_only():
     """Run hyperparameter tuning only."""
     print_header("Hyperparameter Tuning")
@@ -603,6 +945,8 @@ def run_tune_model():
             "Tune only (hyperparameter search)",
             "Train only (use existing config)",
             "Tune then Train (full pipeline)",
+            "Distributed Training (multi-GPU/multi-node)",
+            "Generate SLURM Script (for cluster)",
             "Back to main menu",
         ]
         print_menu(options)
@@ -615,4 +959,8 @@ def run_tune_model():
         elif choice == 3:
             run_tuning_then_training()
         elif choice == 4:
+            run_distributed_training()
+        elif choice == 5:
+            run_slurm_generator()
+        elif choice == 6:
             break

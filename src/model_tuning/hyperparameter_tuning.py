@@ -6,9 +6,12 @@ and Bayesian optimization with Keras/TensorFlow LSTM models.
 
 Works with MusicDataset tensors:
     - pianoroll: (128, max_time_steps)
+    - instrument_id: int32 scalar (0-127, or 128 for drums)
     - genre_id: int32 scalar
+    - drum_pianoroll: (128, max_time_steps) for alignment learning
 """
 
+import gc
 import numpy as np  # type: ignore
 from typing import Dict, Any, Callable, Optional, List, Tuple
 from sklearn.model_selection import GridSearchCV, RandomizedSearchCV  # type: ignore
@@ -39,6 +42,9 @@ class KerasRegressorWrapper(BaseEstimator, RegressorMixin):
 
     Note: sklearn requires 2D arrays (samples x features), but Keras models may expect
     3D+ input. Use input_shape and output_shape to automatically reshape data.
+
+    For multi-input models, use multi_input_config to specify how to split the flattened
+    X array back into multiple inputs. Each entry maps input name to (shape, dtype).
     """
 
     def __init__(
@@ -51,6 +57,7 @@ class KerasRegressorWrapper(BaseEstimator, RegressorMixin):
         callbacks: Optional[List] = None,
         input_shape: Optional[Tuple[int, ...]] = None,
         output_shape: Optional[Tuple[int, ...]] = None,
+        multi_input_config: Optional[Dict[str, Tuple[Tuple[int, ...], str]]] = None,
         **kwargs
     ):
         self.build_fn = build_fn
@@ -61,6 +68,7 @@ class KerasRegressorWrapper(BaseEstimator, RegressorMixin):
         self.callbacks = callbacks
         self.input_shape = input_shape
         self.output_shape = output_shape
+        self.multi_input_config = multi_input_config
         self.model_params = kwargs
         self.model_ = None
         self.history_ = None
@@ -82,6 +90,7 @@ class KerasRegressorWrapper(BaseEstimator, RegressorMixin):
             'callbacks': self.callbacks,
             'input_shape': self.input_shape,
             'output_shape': self.output_shape,
+            'multi_input_config': self.multi_input_config,
         }
         params.update(self.model_params)
         return params
@@ -91,6 +100,31 @@ class KerasRegressorWrapper(BaseEstimator, RegressorMixin):
         if self.input_shape is not None:
             return X.reshape((X.shape[0],) + self.input_shape)
         return X
+
+    def _reshape_multi_input(self, X: np.ndarray) -> List[np.ndarray]:
+        """
+        Split flattened X into multiple inputs for multi-input Keras models.
+
+        Returns a list of arrays in the order specified by multi_input_config.
+        """
+        if self.multi_input_config is None:
+            raise ValueError("multi_input_config must be set for multi-input models")
+
+        n_samples = X.shape[0]
+        inputs = []
+        offset = 0
+
+        for input_name, (shape, dtype) in self.multi_input_config.items():
+            # Calculate the flat size for this input
+            flat_size = int(np.prod(shape))
+            # Extract the slice for this input
+            flat_input = X[:, offset:offset + flat_size]
+            # Reshape to the expected shape
+            reshaped = flat_input.reshape((n_samples,) + shape).astype(dtype)
+            inputs.append(reshaped)
+            offset += flat_size
+
+        return inputs
 
     def _reshape_output(self, y: np.ndarray) -> np.ndarray:
         """Reshape flattened sklearn target back to Keras expected shape."""
@@ -106,10 +140,20 @@ class KerasRegressorWrapper(BaseEstimator, RegressorMixin):
 
     def fit(self, X, y, **kwargs):
         """Fit the model."""
+        # Clear GPU memory from previous model to prevent OOM during hyperparameter search
+        if self.model_ is not None:
+            del self.model_
+            self.model_ = None
+        tf.keras.backend.clear_session()
+        gc.collect()
+
         self.model_ = self.build_fn(**self.model_params)
 
         # Reshape from sklearn 2D to Keras expected shape
-        X_reshaped = self._reshape_input(X)
+        if self.multi_input_config is not None:
+            X_reshaped = self._reshape_multi_input(X)
+        else:
+            X_reshaped = self._reshape_input(X)
         y_reshaped = self._reshape_output(y)
 
         fit_args = {
@@ -130,7 +174,10 @@ class KerasRegressorWrapper(BaseEstimator, RegressorMixin):
         """Make predictions."""
         if self.model_ is None:
             raise RuntimeError("Model must be fitted before making predictions")
-        X_reshaped = self._reshape_input(X)
+        if self.multi_input_config is not None:
+            X_reshaped = self._reshape_multi_input(X)
+        else:
+            X_reshaped = self._reshape_input(X)
         y_pred = self.model_.predict(X_reshaped, **kwargs)
         return self._flatten_output(y_pred)
 
@@ -246,6 +293,8 @@ def create_genre_conditioned_lstm_model(
     output_shape: Tuple[int, int],
     num_genres: int,
     genre_embedding_dim: int = 16,
+    num_instruments: int = 129,
+    instrument_embedding_dim: int = 16,
     lstm_units: Optional[List[int]] = None,
     dense_units: Optional[List[int]] = None,
     dropout_rate: float = 0.2,
@@ -259,19 +308,21 @@ def create_genre_conditioned_lstm_model(
     **kwargs
 ) -> keras.Model:
     """
-    Build LSTM model with genre conditioning.
+    Build LSTM model with genre and instrument conditioning.
 
     Args:
         input_shape: (num_pitches, time_steps) e.g. (128, 1000)
         output_shape: Same as input_shape
         num_genres: Number of genres in vocabulary
         genre_embedding_dim: Dimension of genre embedding
+        num_instruments: Number of instruments (default 129: 0-127 + drums)
+        instrument_embedding_dim: Dimension of instrument embedding
         lstm_units: List of units for each LSTM layer
         dense_units: List of units for each dense layer
         ... (same as create_lstm_model)
 
     Returns:
-        Compiled Keras model with pianoroll and genre inputs
+        Compiled Keras model with pianoroll, genre, instrument, and drum inputs
     """
     if lstm_units is None:
         lstm_units = [128, 64]
@@ -291,22 +342,39 @@ def create_genre_conditioned_lstm_model(
     # Inputs
     pianoroll_input = Input(shape=input_shape, name='pianoroll_input')
     genre_input = Input(shape=(1,), dtype='int32', name='genre_input')
+    instrument_input = Input(shape=(1,), dtype='int32', name='instrument_input')
+    drum_input = Input(shape=input_shape, name='drum_input')
 
     # Genre embedding
     genre_embedded = Embedding(
-        input_dim=num_genres,
+        input_dim=num_genres + 1,
         output_dim=genre_embedding_dim,
         name='genre_embedding'
     )(genre_input)
     genre_embedded = tf.keras.layers.Flatten()(genre_embedded)
 
+    # Instrument embedding
+    instrument_embedded = Embedding(
+        input_dim=num_instruments + 1,
+        output_dim=instrument_embedding_dim,
+        name='instrument_embedding'
+    )(instrument_input)
+    instrument_embedded = tf.keras.layers.Flatten()(instrument_embedded)
+
+    # Combine conditioning
+    conditioning = Concatenate(name='conditioning')([genre_embedded, instrument_embedded])
+
     # Transpose pianoroll for LSTM: (time_steps, 128)
     x = tf.keras.layers.Permute((2, 1))(pianoroll_input)
+    drum_x = tf.keras.layers.Permute((2, 1))(drum_input)
     time_steps = input_shape[1]
 
-    # Tile genre embedding across time steps and concatenate
-    genre_tiled = tf.keras.layers.RepeatVector(time_steps)(genre_embedded)
-    x = Concatenate()([x, genre_tiled])
+    # Concatenate with drum track for alignment
+    x = Concatenate()([x, drum_x])
+
+    # Tile conditioning across time steps and concatenate
+    conditioning_tiled = tf.keras.layers.RepeatVector(time_steps)(conditioning)
+    x = Concatenate()([x, conditioning_tiled])
 
     # LSTM layers
     for i, units in enumerate(lstm_units):
@@ -339,7 +407,7 @@ def create_genre_conditioned_lstm_model(
     x = Dense(output_size, activation='sigmoid')(x)
     outputs = Reshape(output_shape, name='pianoroll_output')(x)
 
-    model = Model([pianoroll_input, genre_input], outputs)
+    model = Model([pianoroll_input, genre_input, instrument_input, drum_input], outputs)
 
     # Compile
     opt = _get_optimizer(optimizer, learning_rate)
@@ -643,10 +711,26 @@ def run_hyperparameter_tuning(
 # Utilities for MusicDataset-based Hyperparameter Tuning
 # =============================================================================
 
+def configure_gpu_memory_growth():
+    """
+    Configure TensorFlow to use GPU memory growth instead of allocating all memory upfront.
+    This prevents OOM errors during hyperparameter tuning where multiple models are created.
+    """
+    gpus = tf.config.experimental.list_physical_devices('GPU')
+    if gpus:
+        try:
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+            print(f"GPU memory growth enabled for {len(gpus)} GPU(s)")
+        except RuntimeError as e:
+            # Memory growth must be set before GPUs have been initialized
+            print(f"Could not set memory growth: {e}")
+
+
 def dataset_to_numpy(
     dataset: "tf.data.Dataset",
     max_samples: Optional[int] = None
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Convert a MusicDataset's tf.data.Dataset to numpy arrays for sklearn tuning.
 
@@ -655,10 +739,12 @@ def dataset_to_numpy(
         max_samples: Maximum samples to load (None for all)
 
     Returns:
-        Tuple of (pianorolls, genre_ids, pianorolls) - X, genre, y
+        Tuple of (pianorolls, genre_ids, instrument_ids, drum_pianorolls, pianorolls)
     """
     pianoroll_list = []
     genre_list = []
+    instrument_list = []
+    drum_list = []
 
     for i, sample in enumerate(dataset):
         if max_samples and i >= max_samples:
@@ -666,12 +752,21 @@ def dataset_to_numpy(
 
         pianoroll_list.append(sample['pianoroll'].numpy())
         genre_list.append(sample['genre_id'].numpy())
+        instrument_list.append(sample['instrument_id'].numpy())
+
+        # Get drum pianoroll if available
+        if 'drum_pianoroll' in sample:
+            drum_list.append(sample['drum_pianoroll'].numpy())
+        else:
+            drum_list.append(np.zeros_like(sample['pianoroll'].numpy()))
 
     pianorolls = np.array(pianoroll_list)
     genre_ids = np.array(genre_list)
+    instrument_ids = np.array(instrument_list)
+    drum_pianorolls = np.array(drum_list)
 
     # For autoencoder-style training, target is same as input
-    return pianorolls, genre_ids, pianorolls
+    return pianorolls, genre_ids, instrument_ids, drum_pianorolls, pianorolls
 
 
 def tune_from_music_dataset(
@@ -680,6 +775,7 @@ def tune_from_music_dataset(
     num_genres: int,
     input_shape: Tuple[int, int] = (128, 1000),
     max_samples: int = 1000,
+    num_instruments: int = 129,
 ) -> Tuple[Any, Dict[str, Any]]:
     """
     Run hyperparameter tuning using MusicDataset.
@@ -692,20 +788,43 @@ def tune_from_music_dataset(
         num_genres: Number of genres in vocabulary
         input_shape: (num_pitches, max_time_steps)
         max_samples: Max samples to use (limits memory)
+        num_instruments: Number of instruments (default 129)
 
     Returns:
         Tuple of (search object, best parameters)
     """
+    # Configure GPU memory growth to prevent OOM during tuning
+    configure_gpu_memory_growth()
+
     print(f"Converting dataset to numpy (max {max_samples} samples)...")
-    pianorolls, genre_ids, targets = dataset_to_numpy(train_dataset, max_samples)
+    pianorolls, genre_ids, instrument_ids, drum_pianorolls, targets = dataset_to_numpy(train_dataset, max_samples)
 
     print(f"  Loaded {len(pianorolls)} samples")
     print(f"  Pianoroll shape: {pianorolls.shape}")
     print(f"  Unique genres: {len(np.unique(genre_ids))}")
+    print(f"  Unique instruments: {len(np.unique(instrument_ids))}")
 
-    # Flatten for sklearn
-    X_flat = pianorolls.reshape(len(pianorolls), -1)
-    y_flat = targets.reshape(len(targets), -1)
+    # Flatten all inputs for sklearn (multi-input model requires concatenation)
+    n_samples = len(pianorolls)
+    pianoroll_flat = pianorolls.reshape(n_samples, -1).astype(np.float32)
+    genre_flat = genre_ids.reshape(n_samples, -1).astype(np.float32)
+    instrument_flat = instrument_ids.reshape(n_samples, -1).astype(np.float32)
+    drum_flat = drum_pianorolls.reshape(n_samples, -1).astype(np.float32)
+
+    # Concatenate all inputs into single X array for sklearn
+    X_flat = np.concatenate([pianoroll_flat, genre_flat, instrument_flat, drum_flat], axis=1)
+    y_flat = targets.reshape(n_samples, -1)
+
+    print(f"  Combined X shape: {X_flat.shape}")
+
+    # Configure multi-input splitting for the wrapper
+    # Order must match the model's input order: pianoroll, genre, instrument, drum
+    multi_input_config = {
+        'pianoroll_input': (input_shape, 'float32'),
+        'genre_input': ((1,), 'int32'),
+        'instrument_input': ((1,), 'int32'),
+        'drum_input': (input_shape, 'float32'),
+    }
 
     # Create build function
     def build_fn(
@@ -713,11 +832,17 @@ def tune_from_music_dataset(
         dense_units=None,
         dropout_rate=0.2,
         learning_rate=0.001,
+        genre_embedding_dim=16,
+        instrument_embedding_dim=16,
         **kwargs
     ):
-        return create_lstm_model(
+        return create_genre_conditioned_lstm_model(
             input_shape=input_shape,
             output_shape=input_shape,
+            num_genres=num_genres,
+            genre_embedding_dim=genre_embedding_dim,
+            num_instruments=num_instruments,
+            instrument_embedding_dim=instrument_embedding_dim,
             lstm_units=lstm_units,
             dense_units=dense_units,
             dropout_rate=dropout_rate,
@@ -726,24 +851,29 @@ def tune_from_music_dataset(
         )
 
     # Create wrapper with reduced epochs for tuning
-    # Pass input_shape and output_shape so the wrapper can reshape sklearn's 2D data
+    # Use multi_input_config for the genre-conditioned model with 4 inputs
     wrapper = KerasRegressorWrapper(
         build_fn=build_fn,
         epochs=10,  # Fewer epochs for tuning
         verbose=0,
-        input_shape=input_shape,
-        output_shape=input_shape,  # autoencoder-style: output same as input
+        output_shape=input_shape,  # autoencoder-style: output same as input pianoroll
+        multi_input_config=multi_input_config,
     )
 
-    # Parameter grid
+    # Parameter grid with instrument embedding options
     param_grid = config.param_grid or {
         'lstm_units': [[64], [128], [128, 64]],
         'dense_units': [[32], [64]],
         'dropout_rate': [0.1, 0.2, 0.3],
         'learning_rate': [0.0001, 0.001, 0.01],
+        'genre_embedding_dim': [8, 16, 32],
+        'instrument_embedding_dim': [8, 16, 32],
     }
 
     method = config.tuning_method.lower()
+
+    # Use n_jobs from config (1 is safe for GPU training, -1 uses all CPUs)
+    n_jobs = config.tuning_n_jobs
 
     if method == 'grid_search':
         search = GridSearchCV(
@@ -751,7 +881,7 @@ def tune_from_music_dataset(
             param_grid=param_grid,
             cv=config.tuning_cv_folds,
             scoring='neg_mean_squared_error',
-            n_jobs=1,
+            n_jobs=n_jobs,
             verbose=config.tuning_verbose,
             return_train_score=True,
         )
@@ -762,7 +892,7 @@ def tune_from_music_dataset(
             n_iter=config.n_iter,
             cv=config.tuning_cv_folds,
             scoring='neg_mean_squared_error',
-            n_jobs=1,
+            n_jobs=n_jobs,
             verbose=config.tuning_verbose,
             random_state=config.cv_random_state,
             return_train_score=True,
@@ -778,7 +908,7 @@ def tune_from_music_dataset(
             n_iter=config.bayesian_n_calls,
             cv=config.tuning_cv_folds,
             scoring='neg_mean_squared_error',
-            n_jobs=1,
+            n_jobs=n_jobs,
             verbose=config.tuning_verbose,
             random_state=config.cv_random_state,
             return_train_score=True,

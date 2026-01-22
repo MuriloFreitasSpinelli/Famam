@@ -4,6 +4,11 @@ from pathlib import Path
 from typing import ClassVar, Optional, Dict, Any, List
 
 
+VALID_DISTRIBUTION_STRATEGIES = {'none', 'mirrored', 'multi_worker_mirrored', 'tpu'}
+VALID_EXECUTION_MODES = {'local', 'slurm'}
+VALID_CROSS_DEVICE_OPS = {'nccl', 'hierarchical_copy', 'reduction_to_one_device'}
+
+
 @dataclass
 class ModelTrainingConfig:
     """
@@ -137,6 +142,15 @@ class ModelTrainingConfig:
     # Random seed for reproducibility
     random_seed: Optional[int] = 42
 
+    # ============ Distribution Settings ============
+    distribution_strategy: str = 'none'  # 'none', 'mirrored', 'multi_worker_mirrored', 'tpu'
+    batch_size_per_replica: Optional[int] = None  # If set, overrides batch_size for distributed
+    mirrored_devices: Optional[List[str]] = None  # Specific devices for MirroredStrategy
+    cross_device_ops: str = 'nccl'  # 'nccl', 'hierarchical_copy', 'reduction_to_one_device'
+
+    # ============ Execution Mode ============
+    execution_mode: str = 'local'  # 'local', 'slurm'
+
     def __post_init__(self):
         """Validate configuration parameters."""
         # Validate optimizer
@@ -189,6 +203,27 @@ class ModelTrainingConfig:
         # Validate LSTM units
         if not self.lstm_units:
             raise ValueError("lstm_units must have at least one layer")
+
+        # Validate distribution strategy
+        if self.distribution_strategy not in VALID_DISTRIBUTION_STRATEGIES:
+            raise ValueError(
+                f"Invalid distribution_strategy '{self.distribution_strategy}'. "
+                f"Must be one of: {', '.join(sorted(VALID_DISTRIBUTION_STRATEGIES))}"
+            )
+
+        # Validate execution mode
+        if self.execution_mode not in VALID_EXECUTION_MODES:
+            raise ValueError(
+                f"Invalid execution_mode '{self.execution_mode}'. "
+                f"Must be one of: {', '.join(sorted(VALID_EXECUTION_MODES))}"
+            )
+
+        # Validate cross device ops
+        if self.cross_device_ops not in VALID_CROSS_DEVICE_OPS:
+            raise ValueError(
+                f"Invalid cross_device_ops '{self.cross_device_ops}'. "
+                f"Must be one of: {', '.join(sorted(VALID_CROSS_DEVICE_OPS))}"
+            )
 
     def get_optimizer_kwargs(self) -> Dict[str, Any]:
         """Get optimizer-specific keyword arguments."""
@@ -304,6 +339,12 @@ class ModelTrainingConfig:
             "Output:",
             f"  Output Directory: {self.output_dir}",
             f"  Random Seed: {self.random_seed}",
+            "",
+            "Distribution:",
+            f"  Strategy: {self.distribution_strategy}",
+            f"  Execution Mode: {self.execution_mode}",
+            f"  Cross-Device Ops: {self.cross_device_ops}",
+            f"  Batch Size per Replica: {self.batch_size_per_replica or self.batch_size}",
             "=" * 70,
         ]
 

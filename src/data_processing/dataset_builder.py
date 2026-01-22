@@ -253,6 +253,9 @@ def build_dataset(
                 stats["filter_reasons"][base_reason] = stats["filter_reasons"].get(base_reason, 0) + 1
                 continue
 
+            # Build song_id from artist/song name
+            song_id = f"{midi_path.parts[-2]}/{midi_path.stem}" if len(midi_path.parts) >= 2 else midi_path.stem
+
             # Apply preprocessing if configured
             if preprocessing_config:
                 processed_samples = preprocess_music(music, preprocessing_config)
@@ -265,12 +268,14 @@ def build_dataset(
                     continue
 
                 # Add all preprocessed samples
-                for sample in processed_samples:
-                    dataset.add(sample, genre)
+                for idx, sample in enumerate(processed_samples):
+                    # Include segment index in song_id for preprocessed samples
+                    segment_song_id = f"{song_id}_seg{idx}" if len(processed_samples) > 1 else song_id
+                    dataset.add(sample, genre, song_id=segment_song_id)
                     stats["samples_added"] += 1
             else:
                 # No preprocessing, add original
-                dataset.add(music, genre)
+                dataset.add(music, genre, song_id=song_id)
                 stats["samples_added"] += 1
 
             stats["files_processed"] += 1
@@ -300,6 +305,15 @@ def build_dataset(
         print(f"  Total entries: {len(dataset)}")
         print(f"  Total tracks: {dataset.count_tracks()}")
         print(f"  Genres: {list(dataset.vocabulary.genre_to_id.keys())}")
+        print(f"  Active instruments: {dataset.vocabulary.num_active_instruments}")
+
+        # Show top instruments
+        inst_stats = dataset.vocabulary.get_instrument_stats()
+        if inst_stats:
+            top_instruments = sorted(inst_stats.items(), key=lambda x: -x[1])[:5]
+            print(f"  Top instruments:")
+            for inst_name, count in top_instruments:
+                print(f"    {inst_name}: {count} songs")
 
     return dataset
 

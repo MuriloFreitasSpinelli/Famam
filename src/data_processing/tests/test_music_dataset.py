@@ -273,3 +273,175 @@ class TestMusicDatasetTensorflow:
 
         # Should only yield 1 sample (empty track skipped)
         assert len(samples) == 1
+
+    def test_drum_pianoroll_included_in_output(self):
+        """Test that drum_pianoroll is included in TensorFlow dataset output."""
+        dataset = MusicDataset(resolution=24, max_time_steps=500)
+        dataset.add(self._create_mock_music(num_tracks=2), "Rock")
+
+        tf_dataset = dataset.to_tensorflow_dataset(include_drums=True)
+        samples = list(tf_dataset.take(1))
+
+        assert len(samples) == 1
+        sample = samples[0]
+        assert "drum_pianoroll" in sample
+        assert sample["drum_pianoroll"].shape == (128, 500)
+
+    def test_drum_pianoroll_excluded_when_disabled(self):
+        """Test that drum_pianoroll is excluded when include_drums=False."""
+        dataset = MusicDataset(resolution=24, max_time_steps=500)
+        dataset.add(self._create_mock_music(num_tracks=2), "Rock")
+
+        tf_dataset = dataset.to_tensorflow_dataset(include_drums=False)
+        samples = list(tf_dataset.take(1))
+
+        assert len(samples) == 1
+        sample = samples[0]
+        assert "drum_pianoroll" not in sample
+
+
+class TestDrumPianorollCaching:
+    """Tests for drum pianoroll caching functionality."""
+
+    def _create_music_with_drums(self, resolution=24, time_steps=240):
+        """Helper to create a Music object with distinct drum and melodic tracks."""
+        music = muspy.Music(resolution=resolution)
+        music.tempos = [muspy.Tempo(time=0, qpm=120)]
+
+        # Drum track with notes at specific pitches
+        drum_track = muspy.Track(program=0, is_drum=True)
+        for i in range(10):
+            drum_track.notes.append(
+                muspy.Note(time=i * 24, pitch=36, duration=12, velocity=100)  # Kick
+            )
+            drum_track.notes.append(
+                muspy.Note(time=i * 24 + 12, pitch=38, duration=12, velocity=80)  # Snare
+            )
+        music.tracks.append(drum_track)
+
+        # Melodic track (piano)
+        piano_track = muspy.Track(program=0, is_drum=False)
+        for i in range(10):
+            piano_track.notes.append(
+                muspy.Note(time=i * 24, pitch=60 + (i % 7), duration=24, velocity=64)
+            )
+        music.tracks.append(piano_track)
+
+        return music
+
+    def _create_music_without_drums(self, resolution=24):
+        """Helper to create a Music object without drum tracks."""
+        music = muspy.Music(resolution=resolution)
+        music.tempos = [muspy.Tempo(time=0, qpm=120)]
+
+        # Only melodic tracks
+        for program in [0, 33]:  # Piano and Bass
+            track = muspy.Track(program=program, is_drum=False)
+            for i in range(10):
+                track.notes.append(
+                    muspy.Note(time=i * 24, pitch=60 + (i % 12), duration=24, velocity=64)
+                )
+            music.tracks.append(track)
+
+        return music
+
+    def test_drum_pianoroll_cached_on_add(self):
+        """Test that drum pianoroll is computed and cached when adding entries."""
+        dataset = MusicDataset(resolution=24, max_time_steps=500)
+        music = self._create_music_with_drums()
+
+        dataset.add(music, "Rock")
+
+        # Check that drum_pianoroll is cached in the entry
+        entry = dataset.entries[0]
+        assert entry.drum_pianoroll is not None
+        assert entry.drum_pianoroll.shape == (128, 500)
+
+        # Verify it has non-zero values at drum pitches
+        assert entry.drum_pianoroll[36, :].sum() > 0  # Kick drum
+        assert entry.drum_pianoroll[38, :].sum() > 0  # Snare drum
+
+    def test_drum_pianoroll_none_when_no_drums(self):
+        """Test that drum_pianoroll is None when music has no drum tracks."""
+        dataset = MusicDataset(resolution=24, max_time_steps=500)
+        music = self._create_music_without_drums()
+
+        dataset.add(music, "Classical")
+
+        entry = dataset.entries[0]
+        assert entry.drum_pianoroll is None
+
+    def test_get_drum_pianoroll_returns_zeros_when_none(self):
+        """Test that _get_drum_pianoroll returns zeros when no drums."""
+        dataset = MusicDataset(resolution=24, max_time_steps=500)
+        music = self._create_music_without_drums()
+
+        dataset.add(music, "Classical")
+
+        entry = dataset.entries[0]
+        drum_pr = dataset._get_drum_pianoroll(entry)
+
+        assert drum_pr.shape == (128, 500)
+        assert drum_pr.sum() == 0  # All zeros
+
+    def test_drum_pianoroll_save_and_load(self):
+        """Test that drum pianoroll is preserved after save/load."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = Path(tmpdir) / "drum_test.h5"
+
+            # Create and save dataset with drums
+            dataset = MusicDataset(resolution=24, max_time_steps=500)
+            music = self._create_music_with_drums()
+            dataset.add(music, "Rock")
+
+            original_drum_pr = dataset.entries[0].drum_pianoroll.copy()
+            dataset.save(str(filepath))
+
+            # Load and verify drum pianoroll matches
+            loaded = MusicDataset.load(str(filepath))
+            loaded_drum_pr = loaded.entries[0].drum_pianoroll
+
+            assert loaded_drum_pr is not None
+            assert loaded_drum_pr.shape == original_drum_pr.shape
+            np.testing.assert_array_almost_equal(loaded_drum_pr, original_drum_pr)
+
+    def test_drum_pianoroll_in_tensorflow_dataset(self):
+        """Test that cached drum pianoroll is used in TensorFlow dataset."""
+        dataset = MusicDataset(resolution=24, max_time_steps=500)
+        music = self._create_music_with_drums()
+        dataset.add(music, "Rock")
+
+        tf_dataset = dataset.to_tensorflow_dataset(include_drums=True)
+
+        # Get all samples (2 tracks)
+        samples = list(tf_dataset)
+        assert len(samples) == 2
+
+        # Both samples should have the same drum pianoroll (from the same entry)
+        drum_pr_1 = samples[0]["drum_pianoroll"].numpy()
+        drum_pr_2 = samples[1]["drum_pianoroll"].numpy()
+
+        np.testing.assert_array_equal(drum_pr_1, drum_pr_2)
+
+        # Verify drum content
+        assert drum_pr_1[36, :].sum() > 0  # Kick
+        assert drum_pr_1[38, :].sum() > 0  # Snare
+
+    def test_multiple_entries_have_independent_drum_pianorolls(self):
+        """Test that each entry has its own independent drum pianoroll."""
+        dataset = MusicDataset(resolution=24, max_time_steps=500)
+
+        # Add music with drums
+        music1 = self._create_music_with_drums()
+        dataset.add(music1, "Rock")
+
+        # Add music without drums
+        music2 = self._create_music_without_drums()
+        dataset.add(music2, "Classical")
+
+        # First entry should have drum pianoroll
+        assert dataset.entries[0].drum_pianoroll is not None
+        assert dataset.entries[0].drum_pianoroll[36, :].sum() > 0
+
+        # Second entry should not have drum pianoroll
+        assert dataset.entries[1].drum_pianoroll is None

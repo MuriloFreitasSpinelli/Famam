@@ -27,6 +27,11 @@ from tensorflow.keras.callbacks import (  # type: ignore
 from tensorflow.keras import regularizers  # type: ignore
 
 from .configs import ModelTrainingConfig
+from .distribution_strategy import (
+    DistributionStrategyFactory,
+    calculate_global_batch_size,
+    get_strategy_info,
+)
 from ..core.vocabulary import Vocabulary
 # ModelBundle imported lazily in save_bundle() to avoid circular import
 
@@ -35,14 +40,16 @@ def build_lstm_model(
     input_shape: Tuple[int, int],
     num_genres: int,
     config: ModelTrainingConfig,
+    num_instruments: int = 129,
 ) -> Model:
     """
-    Build LSTM model with genre conditioning.
+    Build LSTM model with genre and instrument conditioning.
 
     Args:
         input_shape: (num_pitches, max_time_steps) e.g. (128, 1000)
         num_genres: Number of genres in vocabulary
         config: ModelTrainingConfig with architecture settings
+        num_instruments: Number of instruments (default 129: 0-127 + drums)
 
     Returns:
         Compiled Keras model
@@ -60,6 +67,8 @@ def build_lstm_model(
     # === Inputs ===
     pianoroll_input = Input(shape=input_shape, name='pianoroll_input')
     genre_input = Input(shape=(1,), dtype='int32', name='genre_input')
+    instrument_input = Input(shape=(1,), dtype='int32', name='instrument_input')
+    drum_input = Input(shape=input_shape, name='drum_input')
 
     # === Genre embedding ===
     genre_emb = Embedding(
@@ -69,14 +78,29 @@ def build_lstm_model(
     )(genre_input)
     genre_flat = Flatten(name='genre_flat')(genre_emb)
 
+    # === Instrument embedding ===
+    instrument_emb = Embedding(
+        input_dim=num_instruments + 1,  # +1 for unknown/padding
+        output_dim=config.instrument_embedding_dim,
+        name='instrument_embedding'
+    )(instrument_input)
+    instrument_flat = Flatten(name='instrument_flat')(instrument_emb)
+
+    # === Combine conditioning vectors ===
+    conditioning = Concatenate(name='conditioning_concat')([genre_flat, instrument_flat])
+
     # === Process pianoroll through LSTM ===
     # Transpose: (128, time_steps) -> (time_steps, 128) for LSTM
     x = tf.keras.layers.Permute((2, 1), name='permute_input')(pianoroll_input)
+    drum_x = tf.keras.layers.Permute((2, 1), name='permute_drum')(drum_input)
     time_steps = input_shape[1]
 
-    # Tile genre embedding across time steps and concatenate
-    genre_tiled = tf.keras.layers.RepeatVector(time_steps, name='genre_repeat')(genre_flat)
-    x = Concatenate(name='concat_genre')([x, genre_tiled])
+    # Concatenate pianoroll with drum track for alignment learning
+    x = Concatenate(name='concat_drum')([x, drum_x])
+
+    # Tile conditioning vector across time steps and concatenate
+    conditioning_tiled = tf.keras.layers.RepeatVector(time_steps, name='conditioning_repeat')(conditioning)
+    x = Concatenate(name='concat_conditioning')([x, conditioning_tiled])
 
     # === LSTM layers ===
     for i, units in enumerate(config.lstm_units):
@@ -111,7 +135,7 @@ def build_lstm_model(
     output = Reshape(input_shape, name='pianoroll_output')(x)
 
     model = Model(
-        inputs=[pianoroll_input, genre_input],
+        inputs=[pianoroll_input, genre_input, instrument_input, drum_input],
         outputs=output,
         name='music_generator'
     )
@@ -121,9 +145,10 @@ def build_lstm_model(
 
 class ModelTrainer:
     """
-    Trainer for genre-conditioned LSTM music generation.
+    Trainer for genre and instrument-conditioned LSTM music generation.
 
     Works with MusicDataset's tf.data.Dataset format.
+    Supports distributed training via TensorFlow distribution strategies.
     """
 
     def __init__(self, config: ModelTrainingConfig):
@@ -131,22 +156,70 @@ class ModelTrainer:
         self.model: Optional[Model] = None
         self.history = None
         self.num_genres = 0
+        self.num_instruments = 129  # 0-127 + drums
+
+        # Setup distribution strategy
+        self.strategy = self._setup_strategy()
+        self.num_replicas = self.strategy.num_replicas_in_sync
+
+        # Calculate effective batch size
+        if config.batch_size_per_replica is not None:
+            self.global_batch_size = calculate_global_batch_size(
+                config.batch_size_per_replica, self.strategy
+            )
+        else:
+            self.global_batch_size = config.batch_size
+
+    def _setup_strategy(self) -> tf.distribute.Strategy:
+        """
+        Setup distribution strategy based on config.
+
+        Returns:
+            Configured tf.distribute.Strategy instance
+        """
+        strategy = DistributionStrategyFactory.create_strategy(
+            strategy_name=self.config.distribution_strategy,
+            devices=self.config.mirrored_devices,
+            cross_device_ops=self.config.cross_device_ops,
+        )
+
+        if self.config.distribution_strategy != 'none':
+            print(f"\nDistribution strategy: {self.config.distribution_strategy}")
+            print(f"  Replicas in sync: {strategy.num_replicas_in_sync}")
+
+        return strategy
 
     def _prepare_dataset(
         self,
         dataset: tf.data.Dataset,
         batch_size: int,
         shuffle: bool = True,
+        is_training: bool = True,
     ) -> tf.data.Dataset:
         """
         Prepare dataset for training.
 
-        Formats samples to match model input names.
+        Formats samples to match model input names including instrument and drum conditioning.
+        Applies distributed training options when using distribution strategies.
+
+        Args:
+            dataset: Input tf.data.Dataset
+            batch_size: Batch size (will use global_batch_size for distributed)
+            shuffle: Whether to shuffle the dataset
+            is_training: Whether this is a training dataset (affects sharding)
+
+        Returns:
+            Prepared tf.data.Dataset
         """
         def format_sample(sample):
+            # Get drum pianoroll, default to zeros if not present
+            drum_pianoroll = sample.get('drum_pianoroll', tf.zeros_like(sample['pianoroll']))
+
             inputs = {
                 'pianoroll_input': sample['pianoroll'],
                 'genre_input': tf.reshape(sample['genre_id'], (1,)),
+                'instrument_input': tf.reshape(sample['instrument_id'], (1,)),
+                'drum_input': drum_pianoroll,
             }
             # Target is the pianoroll (autoencoder-style reconstruction)
             target = sample['pianoroll']
@@ -157,8 +230,18 @@ class ModelTrainer:
         if shuffle:
             dataset = dataset.shuffle(buffer_size=1000)
 
-        dataset = dataset.batch(batch_size)
+        # Use global batch size for distributed training
+        effective_batch_size = self.global_batch_size if is_training else batch_size
+        dataset = dataset.batch(effective_batch_size)
         dataset = dataset.prefetch(tf.data.AUTOTUNE)
+
+        # For multi-worker strategy, shard the dataset
+        if (self.config.distribution_strategy == 'multi_worker_mirrored' and is_training):
+            options = tf.data.Options()
+            options.experimental_distribute.auto_shard_policy = (
+                tf.data.experimental.AutoShardPolicy.DATA
+            )
+            dataset = dataset.with_options(options)
 
         return dataset
 
@@ -166,15 +249,21 @@ class ModelTrainer:
         self,
         num_genres: int,
         input_shape: Optional[Tuple[int, int]] = None,
+        num_instruments: int = 129,
     ) -> Model:
         """
         Build and compile the LSTM model.
 
+        Model is built within the distribution strategy scope to enable
+        distributed training across multiple devices/nodes.
+
         Args:
             num_genres: Number of genres in vocabulary
             input_shape: Optional override for (num_pitches, max_time_steps)
+            num_instruments: Number of instruments (default 129: 0-127 + drums)
         """
         self.num_genres = num_genres
+        self.num_instruments = num_instruments
 
         if input_shape is None:
             input_shape = (self.config.num_pitches, self.config.max_time_steps)
@@ -182,23 +271,34 @@ class ModelTrainer:
         print(f"\nBuilding model:")
         print(f"  Input shape: {input_shape}")
         print(f"  Num genres: {num_genres}")
+        print(f"  Num instruments: {num_instruments}")
+        print(f"  Genre embedding dim: {self.config.genre_embedding_dim}")
+        print(f"  Instrument embedding dim: {self.config.instrument_embedding_dim}")
         print(f"  LSTM units: {self.config.lstm_units}")
         print(f"  Dense units: {self.config.dense_units}")
         print(f"  Bidirectional: {self.config.bidirectional}")
 
-        self.model = build_lstm_model(
-            input_shape=input_shape,
-            num_genres=num_genres,
-            config=self.config,
-        )
+        if self.config.distribution_strategy != 'none':
+            print(f"  Distribution strategy: {self.config.distribution_strategy}")
+            print(f"  Replicas: {self.num_replicas}")
+            print(f"  Global batch size: {self.global_batch_size}")
 
-        # Compile
-        optimizer = self._get_optimizer()
-        self.model.compile(
-            optimizer=optimizer,
-            loss=self.config.loss_function,
-            metrics=self.config.metrics,
-        )
+        # Build model within strategy scope for distributed training
+        with self.strategy.scope():
+            self.model = build_lstm_model(
+                input_shape=input_shape,
+                num_genres=num_genres,
+                config=self.config,
+                num_instruments=num_instruments,
+            )
+
+            # Compile
+            optimizer = self._get_optimizer()
+            self.model.compile(
+                optimizer=optimizer,
+                loss=self.config.loss_function,
+                metrics=self.config.metrics,
+            )
 
         print(f"\nModel: {self.config.model_name}")
         self.model.summary()
@@ -289,6 +389,7 @@ class ModelTrainer:
         train_dataset: tf.data.Dataset,
         val_dataset: tf.data.Dataset,
         num_genres: int,
+        num_instruments: int = 129,
     ) -> Dict[str, Any]:
         """
         Train the model.
@@ -297,22 +398,25 @@ class ModelTrainer:
             train_dataset: Training tf.data.Dataset from MusicDataset
             val_dataset: Validation tf.data.Dataset
             num_genres: Number of genres in vocabulary
+            num_instruments: Number of instruments (default 129)
 
         Returns:
             Training history dict
         """
         if self.model is None:
-            self.build_model(num_genres)
+            self.build_model(num_genres, num_instruments=num_instruments)
 
         train_ds = self._prepare_dataset(
             train_dataset,
             self.config.batch_size,
-            shuffle=self.config.shuffle
+            shuffle=self.config.shuffle,
+            is_training=True,
         )
         val_ds = self._prepare_dataset(
             val_dataset,
             self.config.batch_size,
-            shuffle=False
+            shuffle=False,
+            is_training=False,
         )
 
         callbacks = self._get_callbacks()
@@ -363,7 +467,8 @@ class ModelTrainer:
         test_ds = self._prepare_dataset(
             test_dataset,
             self.config.batch_size,
-            shuffle=False
+            shuffle=False,
+            is_training=False,
         )
 
         print("\nEvaluating...")
@@ -429,6 +534,7 @@ def train_from_music_dataset(
         datasets['train'],
         datasets['validation'],
         num_genres=vocabulary.num_genres,
+        num_instruments=vocabulary.num_instruments,
     )
 
     if 'test' in datasets:

@@ -1,7 +1,7 @@
 """CLI for music generation."""
 
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
 from src.music_generation import MusicGenerator
 
@@ -48,11 +48,8 @@ def select_model_bundle() -> Optional[str]:
     return str(bundle_files[choice - 1])
 
 
-def run_single_generation(generator: MusicGenerator):
-    """Generate a single MIDI file."""
-    print_header("Generate Single Track")
-
-    # Select genre
+def select_genre(generator: MusicGenerator) -> str:
+    """Select a genre from available genres."""
     genres = generator.list_genres()
     print("Available genres:")
     print("-" * 40)
@@ -61,7 +58,90 @@ def run_single_generation(generator: MusicGenerator):
     print()
 
     genre_choice = get_choice(len(genres), "Select genre: ")
-    genre = genres[genre_choice - 1]
+    return genres[genre_choice - 1]
+
+
+def select_instrument(generator: MusicGenerator, genre: Optional[str] = None) -> str:
+    """Select an instrument from available instruments."""
+    # Get instruments for genre if available, otherwise all active instruments
+    if genre:
+        instruments = generator.get_instruments_for_genre(genre)
+        if not instruments:
+            instruments = generator.list_active_instruments()
+            if not instruments:
+                instruments = generator.list_instruments()[:20]  # Limit to first 20
+    else:
+        instruments = generator.list_active_instruments()
+        if not instruments:
+            instruments = generator.list_instruments()[:20]
+
+    print("Available instruments:")
+    print("-" * 40)
+    for i, inst in enumerate(instruments, 1):
+        print(f"  [{i}] {inst}")
+    print()
+
+    inst_choice = get_choice(len(instruments), "Select instrument: ")
+    return instruments[inst_choice - 1]
+
+
+def select_multiple_instruments(generator: MusicGenerator, genre: Optional[str] = None) -> List[str]:
+    """Select multiple instruments for multi-track generation."""
+    # Get instruments for genre if available
+    if genre:
+        instruments = generator.get_instruments_for_genre(genre)
+        if not instruments:
+            instruments = generator.list_active_instruments()
+            if not instruments:
+                instruments = generator.list_instruments()[:20]
+    else:
+        instruments = generator.list_active_instruments()
+        if not instruments:
+            instruments = generator.list_instruments()[:20]
+
+    # Always include Drums as an option
+    if "Drums" not in instruments:
+        instruments = ["Drums"] + list(instruments)
+
+    print("Available instruments (select multiple):")
+    print("-" * 40)
+    for i, inst in enumerate(instruments, 1):
+        print(f"  [{i}] {inst}")
+    print()
+
+    print("Enter instrument numbers separated by commas (e.g., 1,3,5)")
+    print("Or press Enter for default selection")
+
+    selection = get_input("Instruments", default="")
+
+    if not selection:
+        # Default: Drums + first 2-3 instruments
+        selected = ["Drums"]
+        for inst in instruments:
+            if inst != "Drums" and len(selected) < 4:
+                selected.append(inst)
+        return selected
+
+    # Parse selection
+    try:
+        indices = [int(x.strip()) for x in selection.split(",")]
+        selected = [instruments[i - 1] for i in indices if 1 <= i <= len(instruments)]
+        return selected if selected else ["Drums", instruments[1] if len(instruments) > 1 else instruments[0]]
+    except (ValueError, IndexError):
+        print("Invalid selection, using defaults")
+        return ["Drums"] + instruments[1:3] if len(instruments) > 2 else instruments
+
+
+def run_single_generation(generator: MusicGenerator):
+    """Generate a single instrument MIDI file."""
+    print_header("Generate Single Instrument Track")
+
+    # Select genre
+    genre = select_genre(generator)
+
+    # Select instrument
+    print(f"\nInstruments for '{genre}':")
+    instrument = select_instrument(generator, genre)
 
     # Generation parameters
     print("\nGeneration parameters:")
@@ -72,20 +152,23 @@ def run_single_generation(generator: MusicGenerator):
 
     # Output path
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    default_output = str(OUTPUT_DIR / f"generated_{genre}.mid")
+    inst_clean = instrument.replace(" ", "_").replace("(", "").replace(")", "")
+    default_output = str(OUTPUT_DIR / f"generated_{genre}_{inst_clean}.mid")
     output_path = get_path("Output path", default=default_output)
 
     # Generate
-    print("\nGenerating...")
+    print(f"\nGenerating {instrument} track for {genre}...")
     try:
         music = generator.generate_midi(
             genre=genre,
             output_path=output_path,
+            instrument=instrument,
             temperature=temperature,
             threshold=threshold,
             tempo=tempo,
         )
         print(f"\nGenerated MIDI saved to: {output_path}")
+        print(f"  Instrument: {instrument}")
         print(f"  Tracks: {len(music.tracks)}")
         if music.tracks:
             print(f"  Notes: {sum(len(t.notes) for t in music.tracks)}")
@@ -98,19 +181,15 @@ def run_single_generation(generator: MusicGenerator):
 
 
 def run_batch_generation(generator: MusicGenerator):
-    """Generate multiple MIDI files."""
-    print_header("Generate Multiple Tracks")
+    """Generate multiple MIDI files for a single instrument."""
+    print_header("Generate Multiple Tracks (Single Instrument)")
 
     # Select genre
-    genres = generator.list_genres()
-    print("Available genres:")
-    print("-" * 40)
-    for i, genre in enumerate(genres, 1):
-        print(f"  [{i}] {genre}")
-    print()
+    genre = select_genre(generator)
 
-    genre_choice = get_choice(len(genres), "Select genre: ")
-    genre = genres[genre_choice - 1]
+    # Select instrument
+    print(f"\nInstruments for '{genre}':")
+    instrument = select_instrument(generator, genre)
 
     # Generation parameters
     print("\nGeneration parameters:")
@@ -126,11 +205,12 @@ def run_batch_generation(generator: MusicGenerator):
     output_dir = get_path("Output directory", default=default_output_dir)
 
     # Generate
-    print(f"\nGenerating {count} tracks...")
+    print(f"\nGenerating {count} {instrument} tracks...")
     try:
         paths = generator.generate_batch_midi(
             genre=genre,
             output_dir=output_dir,
+            instrument=instrument,
             count=count,
             temperature=temperature,
             threshold=threshold,
@@ -146,6 +226,130 @@ def run_batch_generation(generator: MusicGenerator):
     except Exception as e:
         print(f"\nError during generation: {e}")
         raise
+
+    input("\nPress Enter to continue...")
+
+
+def run_generate_song(generator: MusicGenerator):
+    """Generate a complete song with drums and multiple instruments."""
+    print_header("Generate Complete Song")
+
+    print("This will generate a complete multi-instrument song.")
+    print("Drums are generated first, then other instruments are aligned to them.\n")
+
+    # Select genre
+    genre = select_genre(generator)
+
+    # Generation parameters
+    print("\nGeneration parameters:")
+    print("-" * 40)
+    temperature = get_float("Temperature (higher = more random)", default=1.0, min_val=0.1, max_val=2.0)
+    threshold = get_float("Threshold (for binarizing notes)", default=0.5, min_val=0.0, max_val=1.0)
+    tempo = get_float("Tempo (BPM)", default=120.0, min_val=40.0, max_val=240.0)
+
+    # Output path
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    default_output = str(OUTPUT_DIR / f"song_{genre}.mid")
+    output_path = get_path("Output path", default=default_output)
+
+    # Generate
+    print(f"\nGenerating complete song for '{genre}'...")
+    try:
+        music = generator.generate_song_midi(
+            genre=genre,
+            output_path=output_path,
+            temperature=temperature,
+            threshold=threshold,
+            tempo=tempo,
+        )
+
+        print(f"\nGenerated song saved to: {output_path}")
+        print(f"  Tracks: {len(music.tracks)}")
+        for track in music.tracks:
+            track_type = "Drums" if track.is_drum else track.name or f"Program {track.program}"
+            print(f"    - {track_type}: {len(track.notes)} notes")
+
+    except Exception as e:
+        print(f"\nError during generation: {e}")
+        raise
+
+    input("\nPress Enter to continue...")
+
+
+def run_multi_instrument_generation(generator: MusicGenerator):
+    """Generate a multi-instrument track with custom instrument selection."""
+    print_header("Generate Multi-Instrument Track (Custom)")
+
+    print("Select specific instruments to include in the generation.\n")
+
+    # Select genre
+    genre = select_genre(generator)
+
+    # Select instruments
+    print(f"\nSelect instruments for '{genre}':")
+    instruments = select_multiple_instruments(generator, genre)
+    print(f"\nSelected instruments: {', '.join(instruments)}")
+
+    # Generation parameters
+    print("\nGeneration parameters:")
+    print("-" * 40)
+    temperature = get_float("Temperature (higher = more random)", default=1.0, min_val=0.1, max_val=2.0)
+    threshold = get_float("Threshold (for binarizing notes)", default=0.5, min_val=0.0, max_val=1.0)
+    tempo = get_float("Tempo (BPM)", default=120.0, min_val=40.0, max_val=240.0)
+
+    # Output path
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    default_output = str(OUTPUT_DIR / f"multi_{genre}.mid")
+    output_path = get_path("Output path", default=default_output)
+
+    # Generate
+    print(f"\nGenerating multi-instrument track...")
+    print(f"Instruments: {', '.join(instruments)}")
+    try:
+        music = generator.generate_multi_instrument_midi(
+            genre=genre,
+            output_path=output_path,
+            instruments=instruments,
+            temperature=temperature,
+            threshold=threshold,
+            tempo=tempo,
+            generate_drums_first="Drums" in instruments,
+        )
+
+        print(f"\nGenerated MIDI saved to: {output_path}")
+        print(f"  Tracks: {len(music.tracks)}")
+        for track in music.tracks:
+            track_type = "Drums" if track.is_drum else track.name or f"Program {track.program}"
+            print(f"    - {track_type}: {len(track.notes)} notes")
+
+    except Exception as e:
+        print(f"\nError during generation: {e}")
+        raise
+
+    input("\nPress Enter to continue...")
+
+
+def show_model_info(generator: MusicGenerator):
+    """Display information about the loaded model."""
+    print_header("Model Information")
+
+    print(generator.summary())
+
+    print("\n" + "=" * 60)
+    print("Available Genres:")
+    print("-" * 40)
+    for genre in generator.list_genres():
+        instruments = generator.get_instruments_for_genre(genre)
+        print(f"  {genre}: {len(instruments)} instruments")
+
+    print("\n" + "=" * 60)
+    print("Active Instruments:")
+    print("-" * 40)
+    active = generator.list_active_instruments()
+    for i, inst in enumerate(active[:15], 1):
+        print(f"  {i}. {inst}")
+    if len(active) > 15:
+        print(f"  ... and {len(active) - 15} more")
 
     input("\nPress Enter to continue...")
 
@@ -173,8 +377,11 @@ def run_generate_music():
         print_header("Generation Options")
 
         options = [
-            "Generate single track",
-            "Generate multiple tracks",
+            "Generate complete song (auto instruments)",
+            "Generate multi-instrument track (custom)",
+            "Generate single instrument track",
+            "Generate batch (single instrument)",
+            "Show model info",
             "Select different model",
             "Back to main menu",
         ]
@@ -182,14 +389,20 @@ def run_generate_music():
         choice = get_choice(len(options))
 
         if choice == 1:
-            run_single_generation(generator)
+            run_generate_song(generator)
         elif choice == 2:
-            run_batch_generation(generator)
+            run_multi_instrument_generation(generator)
         elif choice == 3:
+            run_single_generation(generator)
+        elif choice == 4:
+            run_batch_generation(generator)
+        elif choice == 5:
+            show_model_info(generator)
+        elif choice == 6:
             new_bundle = select_model_bundle()
             if new_bundle:
                 print(f"\nLoading model...")
                 generator = MusicGenerator.from_bundle_path(new_bundle)
                 print(generator.summary())
-        elif choice == 4:
+        elif choice == 7:
             break

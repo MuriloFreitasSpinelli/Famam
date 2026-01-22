@@ -51,7 +51,7 @@ class ModelTuningConfig:
     # Tuning validation
     tuning_cv_folds: int = 3
     tuning_scoring: str = 'neg_mean_squared_error'
-    tuning_n_jobs: int = -1  # Use all available cores
+    tuning_n_jobs: int = 1  # Number of parallel jobs (-1 for all CPUs, 1 for safe cluster use)
     tuning_verbose: int = 2
 
     # ============ Output Settings ============

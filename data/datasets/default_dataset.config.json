@@ -5,7 +5,7 @@
   ],
   "output_path": "data/datasets/default_dataset.h5",
   "genre_tsv_path": "data/midi/clean_midi/genre.tsv",
-  "allowed_genres": null,
+  "allowed_genres": "Pop",
   "min_tracks": 1,
   "max_tracks": 64,
   "min_notes_per_track": 1,
@@ -13,7 +13,7 @@
   "max_duration_seconds": null,
   "resolution": 24,
   "max_time_steps": 1000,
-  "max_samples": 100,
+  "max_samples": 1000,
   "random_seed": null,
   "verbose": true
 }
