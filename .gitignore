@@ -1,9 +1,9 @@
 # Ignore complete dataset, its huge
-data/midi/clean_midi/
 data/
 logs/
 slurm_logs/
 output/
+models/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
