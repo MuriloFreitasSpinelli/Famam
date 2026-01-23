@@ -64,11 +64,12 @@ export TF_CPP_MIN_LOG_LEVEL=1
 export TF_FORCE_GPU_ALLOW_GROWTH=true
 
 # Navigate to project directory
-# Derive project root from script location (script is in slurm_jobs/)
-SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+PROJECT_DIR="$HOME/Famam"
 cd "$PROJECT_DIR"
 echo "Project directory: $PROJECT_DIR"
+
+# Add project to PYTHONPATH so Python can find src module
+export PYTHONPATH="$PROJECT_DIR:$PYTHONPATH"
 
 # ============================================================
 # Copy dataset to local SSD ($TMPDIR) for faster I/O
@@ -137,11 +138,12 @@ export TF_CPP_MIN_LOG_LEVEL=1
 export TF_FORCE_GPU_ALLOW_GROWTH=true
 
 # Navigate to project directory
-# Derive project root from script location (script is in slurm_jobs/)
-SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+PROJECT_DIR="$HOME/Famam"
 cd "$PROJECT_DIR"
 echo "Node $SLURM_NODEID: Project directory: $PROJECT_DIR"
+
+# Add project to PYTHONPATH so Python can find src module
+export PYTHONPATH="$PROJECT_DIR:$PYTHONPATH"
 
 # ============================================================
 # Copy dataset to local SSD ($TMPDIR) for faster I/O
@@ -230,11 +232,12 @@ export TF_CPP_MIN_LOG_LEVEL=1
 export TF_FORCE_GPU_ALLOW_GROWTH=true
 
 # Navigate to project directory
-# Derive project root from script location (script is in slurm_jobs/)
-SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+PROJECT_DIR="$HOME/Famam"
 cd "$PROJECT_DIR"
 echo "Project directory: $PROJECT_DIR"
+
+# Add project to PYTHONPATH so Python can find src module
+export PYTHONPATH="$PROJECT_DIR:$PYTHONPATH"
 
 # ============================================================
 # Copy dataset to local SSD ($TMPDIR) for faster I/O
@@ -280,10 +283,22 @@ echo "Job completed at $(date)"
         return "\n".join(f"module load {mod}" for mod in self.config.module_loads)
 
     def _get_conda_activation(self) -> str:
-        """Generate conda activation command."""
+        """Generate conda activation command for bwUniCluster 3.0."""
         if not self.config.conda_env:
             return "# No conda environment specified"
-        return f"source $(conda info --base)/etc/profile.d/conda.sh\nconda activate {self.config.conda_env}"
+        # On bwUniCluster 3.0, conda may be installed as miniconda3, miniforge3, or mambaforge
+        return f'''# Initialize conda from user installation
+if [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
+    source "$HOME/miniconda3/etc/profile.d/conda.sh"
+elif [ -f "$HOME/miniforge3/etc/profile.d/conda.sh" ]; then
+    source "$HOME/miniforge3/etc/profile.d/conda.sh"
+elif [ -f "$HOME/mambaforge/etc/profile.d/conda.sh" ]; then
+    source "$HOME/mambaforge/etc/profile.d/conda.sh"
+else
+    echo "ERROR: Cannot find conda installation in $HOME/miniconda3, $HOME/miniforge3, or $HOME/mambaforge"
+    exit 1
+fi
+conda activate {self.config.conda_env}'''
 
     def _get_exclusive_line(self) -> str:
         """Get exclusive node directive if requested."""

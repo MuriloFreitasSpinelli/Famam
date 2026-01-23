@@ -39,7 +39,10 @@ class SlurmConfig:
 
     # ============ Environment Setup ============
     conda_env: Optional[str] = None
-    module_loads: List[str] = field(default_factory=lambda: ['devel/cuda/12.1', 'devel/python/3.11'])
+    # Note: Module names vary by cluster. Run 'module spider cuda' to find available versions.
+    # Common patterns: compiler/cuda/12.x, devel/cuda/12.x
+    # Python module is often not needed if using conda environment
+    module_loads: List[str] = field(default_factory=list)
 
     # ============ Multi-Node Settings ============
     ntasks_per_node: int = 1  # For multi-node: one task per node

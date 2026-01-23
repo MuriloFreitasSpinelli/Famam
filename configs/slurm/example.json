@@ -7,10 +7,7 @@
   "memory_gb": 32,
   "time_limit": "00:30:00",
   "conda_env": "famam_gpu",
-  "module_loads": [
-    "devel/cuda/12.1",
-    "devel/python/3.11"
-  ],
+  "module_loads": ["devel/cuda/12.8"],
   "ntasks_per_node": 1,
   "output_dir": "./slurm_jobs",
   "log_dir": "./slurm_logs",
