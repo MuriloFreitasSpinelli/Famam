@@ -620,8 +620,11 @@ def create_search_spaces_for_bayesian(param_grid: Dict[str, List[Any]]) -> Dict[
             search_spaces[param_name] = Integer(min(values), max(values))
         elif isinstance(values[0], (float, np.floating)):
             search_spaces[param_name] = Real(min(values), max(values))
-        elif isinstance(values[0], (str, list)):
+        elif isinstance(values[0], str):
             search_spaces[param_name] = Categorical(values)
+        elif isinstance(values[0], list):
+            # Convert lists to tuples since Categorical requires hashable types
+            search_spaces[param_name] = Categorical([tuple(v) for v in values])
         else:
             search_spaces[param_name] = Categorical(values)
 
@@ -919,4 +922,10 @@ def tune_from_music_dataset(
     print(f"\nBest Score: {search.best_score_:.4f}")  # type: ignore
     print(f"Best Parameters: {search.best_params_}")  # type: ignore
 
-    return search, search.best_params_  # type: ignore
+    # Convert tuples back to lists in best_params (needed for bayesian search)
+    best_params = {
+        k: list(v) if isinstance(v, tuple) else v
+        for k, v in search.best_params_.items()  # type: ignore
+    }
+
+    return search, best_params
