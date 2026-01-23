@@ -1,5 +1,5 @@
 # Ignore complete dataset, its huge
-data/
+data/midi/
 logs/
 slurm_logs/
 output/

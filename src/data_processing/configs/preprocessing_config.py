@@ -25,7 +25,7 @@ class PreprocessingConfig:
     # === Segmentation ===
     # Split music into fixed-length segments
     segment_length: Optional[int] = None  # Time steps; None = no segmentation
-    max_padding_ratio: float = 0.7  # Discard if padding > 70% of segment
+    max_padding_ratio: float = 0.3  # Discard if padding > 30% (require 70% content)
 
     # === Augmentation: Transposition ===
     # Shifts all pitches by constant interval, exploiting relative pitch structure

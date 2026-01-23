@@ -74,13 +74,13 @@ def remove_empty_tracks(music: muspy.Music) -> muspy.Music:
 def segment_music(
     music: muspy.Music,
     segment_length: int,
-    max_padding_ratio: float = 0.7,
+    max_padding_ratio: float = 0.3,
 ) -> List[muspy.Music]:
     """
     Split music into fixed-length segments.
 
     If the final segment requires more than max_padding_ratio padding,
-    it will be discarded.
+    it will be discarded (default 0.3 = require at least 70% content).
 
     Args:
         music: MusPy Music object
@@ -181,6 +181,9 @@ def transpose_music(music: muspy.Music, semitones: int) -> muspy.Music:
     """
     Transpose all pitches by a constant interval.
 
+    Notes that would fall outside valid MIDI range (0-127) are removed
+    to prevent artificial clustering at boundary pitches.
+
     Args:
         music: MusPy Music object
         semitones: Number of semitones to shift (positive = up, negative = down)
@@ -195,16 +198,17 @@ def transpose_music(music: muspy.Music, semitones: int) -> muspy.Music:
             # Don't transpose drum tracks
             continue
 
+        # Filter notes to only include those within valid range after transposition
+        valid_notes = []
         for note in track.notes:
             new_pitch = note.pitch + semitones
-            # Clamp to valid MIDI range
+            # Only keep notes within valid MIDI range
             if 0 <= new_pitch <= 127:
                 note.pitch = new_pitch
-            # Notes outside range are kept at boundary
-            elif new_pitch < 0:
-                note.pitch = 0
-            else:
-                note.pitch = 127
+                valid_notes.append(note)
+            # Notes outside range are discarded (not clamped)
+
+        track.notes = valid_notes
 
     return music
 
@@ -241,8 +245,8 @@ def vary_tempo(music: muspy.Music, factor: float) -> muspy.Music:
 
     for track in music.tracks:
         for note in track.notes:
-            note.time = int(note.time / factor)
-            note.duration = max(1, int(note.duration / factor))
+            note.time = round(note.time / factor)
+            note.duration = max(1, round(note.duration / factor))
 
     return music
 
@@ -319,19 +323,20 @@ def preprocess_music(
     if len(segments) == 0:
         return []
 
-    # Step 5: Augmentation
+    # Step 5: Augmentation (applied independently, not multiplicatively)
+    # This prevents exponential growth of highly correlated samples
     results = []
 
     for segment in segments:
         # Add original
         results.append(segment)
 
-        # Transposition augmentation
+        # Transposition augmentation (applied to original only)
         if config.enable_transposition:
             transposed = generate_transpositions(segment, config.transposition_semitones)
             results.extend(transposed)
 
-        # Tempo variation augmentation
+        # Tempo variation augmentation (applied to original only)
         if config.enable_tempo_variation:
             tempo_varied = generate_tempo_variations(
                 segment,
@@ -339,15 +344,5 @@ def preprocess_music(
                 config.tempo_variation_steps,
             )
             results.extend(tempo_varied)
-
-            # Also apply tempo variation to transposed versions if both enabled
-            if config.enable_transposition:
-                for transposed_seg in transposed:
-                    tempo_varied_transposed = generate_tempo_variations(
-                        transposed_seg,
-                        config.tempo_variation_range,
-                        config.tempo_variation_steps,
-                    )
-                    results.extend(tempo_varied_transposed)
 
     return results

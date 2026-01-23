@@ -19,7 +19,7 @@ from tensorflow import keras  # type: ignore
 from tensorflow.keras.models import Model  # type: ignore
 from tensorflow.keras.layers import (  # type: ignore
     Input, LSTM, Bidirectional, Dense, Dropout, Embedding,
-    Concatenate, Flatten, Reshape
+    Concatenate, Flatten, Reshape, TimeDistributed, Permute
 )
 from tensorflow.keras.callbacks import (  # type: ignore
     EarlyStopping, ModelCheckpoint, TensorBoard, ReduceLROnPlateau
@@ -103,12 +103,11 @@ def build_lstm_model(
     x = Concatenate(name='concat_conditioning')([x, conditioning_tiled])
 
     # === LSTM layers ===
+    # All LSTM layers return sequences to preserve temporal structure
     for i, units in enumerate(config.lstm_units):
-        return_sequences = (i < len(config.lstm_units) - 1)
-
         lstm = LSTM(
             units,
-            return_sequences=return_sequences,
+            return_sequences=True,  # Always return sequences for seq-to-seq
             dropout=config.dropout_rate,
             recurrent_dropout=config.recurrent_dropout,
             kernel_regularizer=reg,
@@ -123,16 +122,24 @@ def build_lstm_model(
         if config.dropout_rate > 0 and i < len(config.lstm_units) - 1:
             x = Dropout(config.dropout_rate, name=f'dropout_lstm_{i}')(x)
 
-    # === Dense layers ===
+    # === Dense layers (TimeDistributed to process each timestep) ===
     for i, units in enumerate(config.dense_units):
-        x = Dense(units, activation='relu', kernel_regularizer=reg, name=f'dense_{i}')(x)
+        x = TimeDistributed(
+            Dense(units, activation='relu', kernel_regularizer=reg),
+            name=f'dense_{i}'
+        )(x)
         if config.dropout_rate > 0:
             x = Dropout(config.dropout_rate, name=f'dropout_dense_{i}')(x)
 
-    # === Output - same shape as input pianoroll ===
-    output_size = input_shape[0] * input_shape[1]
-    x = Dense(output_size, activation='sigmoid', name='output_dense')(x)
-    output = Reshape(input_shape, name='pianoroll_output')(x)
+    # === Output - predict 128 pitches per timestep ===
+    # Shape: (batch, time_steps, 128)
+    x = TimeDistributed(
+        Dense(input_shape[0], activation='sigmoid'),
+        name='pitch_output'
+    )(x)
+
+    # Permute back to (128, time_steps) to match input pianoroll shape
+    output = Permute((2, 1), name='pianoroll_output')(x)
 
     model = Model(
         inputs=[pianoroll_input, genre_input, instrument_input, drum_input],
@@ -228,7 +235,7 @@ class ModelTrainer:
         dataset = dataset.map(format_sample, num_parallel_calls=tf.data.AUTOTUNE)
 
         if shuffle:
-            dataset = dataset.shuffle(buffer_size=1000)
+            dataset = dataset.shuffle(buffer_size=self.config.shuffle_buffer_size)
 
         # Use global batch size for distributed training
         effective_batch_size = self.global_batch_size if is_training else batch_size

@@ -21,7 +21,8 @@ import tensorflow as tf  # type: ignore
 from tensorflow import keras  # type: ignore
 from tensorflow.keras.models import Model  # type: ignore
 from tensorflow.keras.layers import (  # type: ignore
-    Input, LSTM, Bidirectional, Dense, Dropout, Embedding, Concatenate, Reshape
+    Input, LSTM, Bidirectional, Dense, Dropout, Embedding, Concatenate, Reshape,
+    TimeDistributed, Permute
 )
 from tensorflow.keras import regularizers  # type: ignore
 
@@ -248,13 +249,11 @@ def create_lstm_model(
     # Transpose for LSTM: (time_steps, 128) so LSTM processes time dimension
     x = tf.keras.layers.Permute((2, 1))(inputs)
 
-    # LSTM layers
+    # LSTM layers - all return sequences for seq-to-seq
     for i, units in enumerate(lstm_units):
-        return_sequences = (i < len(lstm_units) - 1)
-
         lstm_layer = LSTM(
             units,
-            return_sequences=return_sequences,
+            return_sequences=True,  # Always return sequences
             dropout=dropout_rate,
             recurrent_dropout=recurrent_dropout,
             kernel_regularizer=regularizer,
@@ -268,16 +267,16 @@ def create_lstm_model(
         if dropout_rate > 0 and i < len(lstm_units) - 1:
             x = Dropout(dropout_rate)(x)
 
-    # Dense layers
+    # Dense layers (TimeDistributed to process each timestep)
     for units in dense_units:
-        x = Dense(units, activation='relu', kernel_regularizer=regularizer)(x)
+        x = TimeDistributed(Dense(units, activation='relu', kernel_regularizer=regularizer))(x)
         if dropout_rate > 0:
             x = Dropout(dropout_rate)(x)
 
-    # Output layer - flatten to match pianoroll output
-    output_size = output_shape[0] * output_shape[1]
-    x = Dense(output_size, activation='sigmoid')(x)
-    outputs = Reshape(output_shape)(x)
+    # Output layer - predict pitches per timestep
+    x = TimeDistributed(Dense(output_shape[0], activation='sigmoid'))(x)
+    # Permute back to (pitches, time_steps)
+    outputs = Permute((2, 1))(x)
 
     model = Model(inputs, outputs)
 
@@ -376,13 +375,11 @@ def create_genre_conditioned_lstm_model(
     conditioning_tiled = tf.keras.layers.RepeatVector(time_steps)(conditioning)
     x = Concatenate()([x, conditioning_tiled])
 
-    # LSTM layers
+    # LSTM layers - all return sequences for seq-to-seq
     for i, units in enumerate(lstm_units):
-        return_sequences = (i < len(lstm_units) - 1)
-
         lstm_layer = LSTM(
             units,
-            return_sequences=return_sequences,
+            return_sequences=True,  # Always return sequences
             dropout=dropout_rate,
             recurrent_dropout=recurrent_dropout,
             kernel_regularizer=regularizer,
@@ -396,16 +393,16 @@ def create_genre_conditioned_lstm_model(
         if dropout_rate > 0 and i < len(lstm_units) - 1:
             x = Dropout(dropout_rate)(x)
 
-    # Dense layers
+    # Dense layers (TimeDistributed to process each timestep)
     for units in dense_units:
-        x = Dense(units, activation='relu', kernel_regularizer=regularizer)(x)
+        x = TimeDistributed(Dense(units, activation='relu', kernel_regularizer=regularizer))(x)
         if dropout_rate > 0:
             x = Dropout(dropout_rate)(x)
 
-    # Output layer
-    output_size = output_shape[0] * output_shape[1]
-    x = Dense(output_size, activation='sigmoid')(x)
-    outputs = Reshape(output_shape, name='pianoroll_output')(x)
+    # Output layer - predict pitches per timestep
+    x = TimeDistributed(Dense(output_shape[0], activation='sigmoid'))(x)
+    # Permute back to (pitches, time_steps)
+    outputs = Permute((2, 1), name='pianoroll_output')(x)
 
     model = Model([pianoroll_input, genre_input, instrument_input, drum_input], outputs)
 

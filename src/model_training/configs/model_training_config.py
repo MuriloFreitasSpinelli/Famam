@@ -59,6 +59,7 @@ class ModelTrainingConfig:
     batch_size: int = 32
     epochs: int = 100
     shuffle: bool = True
+    shuffle_buffer_size: int = 10000  # Buffer size for tf.data.Dataset.shuffle()
     optimizer: str = 'adam'
     learning_rate: float = 0.001
     loss_function: str = 'mse'
