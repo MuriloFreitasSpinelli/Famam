@@ -105,12 +105,25 @@ class KerasRegressorWrapper(BaseEstimator, RegressorMixin):
         params.update(self.model_params)
         return params
 
-    def _convert_tuples_to_lists(self, params: Dict) -> Dict:
-        """Convert tuple values to lists for build_fn compatibility."""
+    def _convert_params_for_build(self, params: Dict) -> Dict:
+        """
+        Convert parameter values for build_fn compatibility.
+
+        Handles:
+        - Tuples -> lists (from older tuple-based Categorical)
+        - String-encoded lists -> actual lists (from string-based Categorical)
+        """
         converted = {}
         for key, value in params.items():
             if isinstance(value, tuple):
                 converted[key] = list(value)
+            elif isinstance(value, str) and value.startswith('[') and value.endswith(']'):
+                # String-encoded list from Bayesian search
+                import ast
+                try:
+                    converted[key] = ast.literal_eval(value)
+                except (ValueError, SyntaxError):
+                    converted[key] = value
             else:
                 converted[key] = value
         return converted
@@ -167,8 +180,8 @@ class KerasRegressorWrapper(BaseEstimator, RegressorMixin):
         tf.keras.backend.clear_session()
         gc.collect()
 
-        # Convert tuples to lists for build_fn (skopt uses tuples for Categorical)
-        build_params = self._convert_tuples_to_lists(self.model_params)
+        # Convert params for build_fn (handles tuples and string-encoded lists from skopt)
+        build_params = self._convert_params_for_build(self.model_params)
         self.model_ = self.build_fn(**build_params)
 
         # Reshape from sklearn 2D to Keras expected shape
@@ -636,6 +649,10 @@ def create_search_spaces_for_bayesian(param_grid: Dict[str, List[Any]]) -> Dict[
     """
     Convert a parameter grid to Bayesian search spaces.
 
+    For discrete options (small lists of specific values), uses Categorical.
+    For list-valued parameters (like lstm_units=[[64], [128, 64]]), uses
+    string encoding to avoid skopt's issues with tuple-valued Categorical spaces.
+
     Args:
         param_grid: Dictionary with parameter names and lists of values
 
@@ -648,19 +665,40 @@ def create_search_spaces_for_bayesian(param_grid: Dict[str, List[Any]]) -> Dict[
     search_spaces = {}
 
     for param_name, values in param_grid.items():
-        if isinstance(values[0], (int, np.integer)):
-            search_spaces[param_name] = Integer(min(values), max(values))
-        elif isinstance(values[0], (float, np.floating)):
-            search_spaces[param_name] = Real(min(values), max(values))
-        elif isinstance(values[0], str):
+        first_val = values[0]
+
+        # Check if this is a list of lists (like lstm_units configurations)
+        if isinstance(first_val, list):
+            # Use string encoding: "[64]", "[128, 64]", etc.
+            # This avoids skopt's issues with tuple-valued Categorical spaces
+            str_values = [str(v) for v in values]
+            search_spaces[param_name] = Categorical(str_values)
+
+        # For numeric types with few discrete options, use Categorical (not Real/Integer ranges)
+        # This preserves the exact values you specified instead of sampling continuously
+        elif isinstance(first_val, (int, np.integer, float, np.floating)):
+            # Use Categorical for discrete options (treats them as exact choices)
             search_spaces[param_name] = Categorical(values)
-        elif isinstance(values[0], list):
-            # Convert lists to tuples since Categorical requires hashable types
-            search_spaces[param_name] = Categorical([tuple(v) for v in values])
+
+        elif isinstance(first_val, str):
+            search_spaces[param_name] = Categorical(values)
+
         else:
             search_spaces[param_name] = Categorical(values)
 
     return search_spaces
+
+
+def _decode_bayesian_param(value: Any) -> Any:
+    """Decode a parameter value that may have been string-encoded for Bayesian search."""
+    if isinstance(value, str) and value.startswith('[') and value.endswith(']'):
+        # This looks like a string-encoded list, parse it
+        import ast
+        try:
+            return ast.literal_eval(value)
+        except (ValueError, SyntaxError):
+            return value
+    return value
 
 
 def run_hyperparameter_tuning(
@@ -966,10 +1004,19 @@ def tune_from_music_dataset(
     print(f"Best Parameters: {search.best_params_}")  # type: ignore
     sys.stdout.flush()
 
-    # Convert tuples back to lists in best_params (needed for bayesian search)
-    best_params = {
-        k: list(v) if isinstance(v, tuple) else v
-        for k, v in search.best_params_.items()  # type: ignore
-    }
+    # Convert best_params: decode string-encoded lists and convert tuples to lists
+    best_params = {}
+    for k, v in search.best_params_.items():  # type: ignore
+        if isinstance(v, tuple):
+            best_params[k] = list(v)
+        elif isinstance(v, str) and v.startswith('[') and v.endswith(']'):
+            # String-encoded list from Bayesian search
+            import ast
+            try:
+                best_params[k] = ast.literal_eval(v)
+            except (ValueError, SyntaxError):
+                best_params[k] = v
+        else:
+            best_params[k] = v
 
     return search, best_params
