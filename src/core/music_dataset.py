@@ -114,8 +114,8 @@ class MusicDataset:
         # Use MusPy's built-in pianoroll representation (T, 128)
         pianoroll = temp_music.to_representation("pianoroll")
 
-        # Transpose to (128, T) and pad/truncate to fixed size
-        pianoroll = pianoroll.T.astype(np.float32)
+        # Transpose to (128, T) and binarize (note on/off, ignore velocity)
+        pianoroll = (pianoroll.T > 0).astype(np.float32)  # Binary: 0=off, 1=on
 
         # Pad or truncate to max_time_steps
         current_steps = pianoroll.shape[1]
