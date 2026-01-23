@@ -7,11 +7,16 @@ Generates SBATCH scripts for:
 - Multi-node distributed training (MultiWorkerMirroredStrategy)
 """
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Optional
 from datetime import datetime
 
 from .configs.slurm_config import SlurmConfig
+
+
+def to_posix_path(path_str: str) -> str:
+    """Convert a path string to POSIX format (forward slashes) for Linux compatibility."""
+    return str(PurePosixPath(Path(path_str)))
 
 
 class SlurmScriptGenerator:
@@ -333,7 +338,7 @@ echo "Job completed at $(date)"
             cpus_per_task=self.config.cpus_per_task,
             memory_gb=self.config.memory_gb,
             time_limit=self.config.time_limit,
-            log_dir=self.config.log_dir,
+            log_dir=to_posix_path(self.config.log_dir),
             total_gpus=self.config.total_gpus,
             exclusive_line=self._get_exclusive_line(),
             email_lines=self._get_email_lines(),
@@ -341,9 +346,9 @@ echo "Job completed at $(date)"
             strategy=effective_strategy,
             module_loads=self._get_module_loads(),
             conda_activation=self._get_conda_activation(),
-            project_dir=project_dir,
-            config_path=config_path,
-            dataset_path=dataset_path,
+            project_dir=to_posix_path(project_dir),
+            config_path=to_posix_path(config_path),
+            dataset_path=to_posix_path(dataset_path),
         )
 
         return script
@@ -381,16 +386,16 @@ echo "Job completed at $(date)"
             cpus_per_task=self.config.cpus_per_task,
             memory_gb=self.config.memory_gb,
             time_limit=self.config.time_limit,
-            log_dir=self.config.log_dir,
+            log_dir=to_posix_path(self.config.log_dir),
             exclusive_line=self._get_exclusive_line(),
             email_lines=self._get_email_lines(),
             timestamp=timestamp,
             module_loads=self._get_module_loads(),
             conda_activation=self._get_conda_activation(),
-            project_dir=project_dir,
-            tuning_config_path=tuning_config_path,
-            training_config_path=training_config_path,
-            dataset_path=dataset_path,
+            project_dir=to_posix_path(project_dir),
+            tuning_config_path=to_posix_path(tuning_config_path),
+            training_config_path=to_posix_path(training_config_path),
+            dataset_path=to_posix_path(dataset_path),
             max_samples=max_samples,
         )
 
@@ -439,8 +444,9 @@ echo "Job completed at $(date)"
         with open(output_path, 'w', newline='\n') as f:
             f.write(script)
 
+        posix_output = to_posix_path(str(output_path))
         print(f"SLURM script saved to: {output_path}")
-        print(f"Submit with: sbatch {output_path}")
+        print(f"Submit with: sbatch {posix_output}")
 
         return output_path
 
@@ -489,8 +495,9 @@ echo "Job completed at $(date)"
         with open(output_path, 'w', newline='\n') as f:
             f.write(script)
 
+        posix_output = to_posix_path(str(output_path))
         print(f"SLURM script saved to: {output_path}")
-        print(f"Submit with: sbatch {output_path}")
+        print(f"Submit with: sbatch {posix_output}")
 
         return output_path
 

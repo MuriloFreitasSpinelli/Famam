@@ -12,8 +12,8 @@
     "devel/python/3.11"
   ],
   "ntasks_per_node": 1,
-  "output_dir": "C:\\Users\\pupul\\Desktop\\Famam\\slurm_jobs",
-  "log_dir": "C:\\Users\\pupul\\Desktop\\Famam\\slurm_logs",
+  "output_dir": "./slurm_jobs",
+  "log_dir": "./slurm_logs",
   "exclusive": false,
   "email": "murilodefreitasspinelli@gmail.com",
   "email_type": "END,FAIL"
