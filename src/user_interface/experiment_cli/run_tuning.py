@@ -95,6 +95,7 @@ def parse_args():
 
 def main():
     """Main entry point for tuning."""
+    import sys
     args = parse_args()
 
     print("=" * 70)
@@ -104,6 +105,7 @@ def main():
     print(f"Dataset: {args.dataset}")
     print(f"Max samples: {args.max_samples}")
     print("=" * 70)
+    sys.stdout.flush()  # Ensure output is visible in SLURM logs
 
     # Validate paths
     tuning_config_path = Path(args.tuning_config)
@@ -129,6 +131,7 @@ def main():
 
     # Load tuning configuration
     print("\nLoading tuning configuration...")
+    sys.stdout.flush()
     tuning_config = ModelTuningConfig.load(str(tuning_config_path))
 
     # Override n_jobs if specified
@@ -138,16 +141,20 @@ def main():
     print(f"  Method: {tuning_config.tuning_method}")
     print(f"  CV folds: {tuning_config.tuning_cv_folds}")
     print(f"  N jobs: {tuning_config.tuning_n_jobs}")
+    sys.stdout.flush()
 
     # Load dataset
     print("\nLoading dataset...")
+    sys.stdout.flush()
     dataset = MusicDataset.load(str(dataset_path))
     print(f"  Entries: {len(dataset)}")
     print(f"  Tracks: {dataset.count_tracks()}")
     print(f"  Genres: {list(dataset.vocabulary.genre_to_id.keys())}")
+    sys.stdout.flush()
 
     # Convert to TensorFlow dataset
     print("\nConverting dataset to TensorFlow format...")
+    sys.stdout.flush()
     tf_dataset = dataset.to_tensorflow_dataset()
 
     # Determine input shape
@@ -156,11 +163,13 @@ def main():
         dataset.max_time_steps
     )
     print(f"  Input shape: {input_shape}")
+    sys.stdout.flush()
 
     # Run tuning
     print("\n" + "=" * 70)
     print("Starting hyperparameter tuning...")
     print("=" * 70 + "\n")
+    sys.stdout.flush()
 
     try:
         search, best_params = tune_from_music_dataset(

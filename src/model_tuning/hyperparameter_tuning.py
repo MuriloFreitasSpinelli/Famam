@@ -70,14 +70,23 @@ class KerasRegressorWrapper(BaseEstimator, RegressorMixin):
         self.input_shape = input_shape
         self.output_shape = output_shape
         self.multi_input_config = multi_input_config
-        self.model_params = kwargs
+        self.model_params = dict(kwargs)  # Make a copy to avoid mutation issues
         self.model_ = None
         self.history_ = None
 
     def set_params(self, **params):
         """Set parameters for this estimator."""
+        # Known fixed parameters
+        fixed_params = {
+            'build_fn', 'epochs', 'batch_size', 'verbose', 'validation_split',
+            'callbacks', 'input_shape', 'output_shape', 'multi_input_config'
+        }
         for key, value in params.items():
-            setattr(self, key, value)
+            if key in fixed_params:
+                setattr(self, key, value)
+            else:
+                # Store hyperparameters in model_params dict
+                self.model_params[key] = value
         return self
 
     def get_params(self, deep=True):
@@ -95,6 +104,16 @@ class KerasRegressorWrapper(BaseEstimator, RegressorMixin):
         }
         params.update(self.model_params)
         return params
+
+    def _convert_tuples_to_lists(self, params: Dict) -> Dict:
+        """Convert tuple values to lists for build_fn compatibility."""
+        converted = {}
+        for key, value in params.items():
+            if isinstance(value, tuple):
+                converted[key] = list(value)
+            else:
+                converted[key] = value
+        return converted
 
     def _reshape_input(self, X: np.ndarray) -> np.ndarray:
         """Reshape flattened sklearn input back to Keras expected shape."""
@@ -148,7 +167,9 @@ class KerasRegressorWrapper(BaseEstimator, RegressorMixin):
         tf.keras.backend.clear_session()
         gc.collect()
 
-        self.model_ = self.build_fn(**self.model_params)
+        # Convert tuples to lists for build_fn (skopt uses tuples for Categorical)
+        build_params = self._convert_tuples_to_lists(self.model_params)
+        self.model_ = self.build_fn(**build_params)
 
         # Reshape from sklearn 2D to Keras expected shape
         if self.multi_input_config is not None:
@@ -741,6 +762,8 @@ def dataset_to_numpy(
     Returns:
         Tuple of (pianorolls, genre_ids, instrument_ids, drum_pianorolls, pianorolls)
     """
+    import sys
+
     pianoroll_list = []
     genre_list = []
     instrument_list = []
@@ -749,6 +772,11 @@ def dataset_to_numpy(
     for i, sample in enumerate(dataset):
         if max_samples and i >= max_samples:
             break
+
+        # Print progress every 100 samples
+        if (i + 1) % 100 == 0:
+            print(f"  Processing sample {i + 1}/{max_samples if max_samples else '?'}...")
+            sys.stdout.flush()
 
         pianoroll_list.append(sample['pianoroll'].numpy())
         genre_list.append(sample['genre_id'].numpy())
@@ -796,13 +824,16 @@ def tune_from_music_dataset(
     # Configure GPU memory growth to prevent OOM during tuning
     configure_gpu_memory_growth()
 
+    import sys
     print(f"Converting dataset to numpy (max {max_samples} samples)...")
+    sys.stdout.flush()
     pianorolls, genre_ids, instrument_ids, drum_pianorolls, targets = dataset_to_numpy(train_dataset, max_samples)
 
     print(f"  Loaded {len(pianorolls)} samples")
     print(f"  Pianoroll shape: {pianorolls.shape}")
     print(f"  Unique genres: {len(np.unique(genre_ids))}")
     print(f"  Unique instruments: {len(np.unique(instrument_ids))}")
+    sys.stdout.flush()
 
     # Flatten all inputs for sklearn (multi-input model requires concatenation)
     n_samples = len(pianorolls)
@@ -917,10 +948,12 @@ def tune_from_music_dataset(
         raise ValueError(f"Unknown method: {method}")
 
     print(f"Starting {method} hyperparameter tuning...")
+    sys.stdout.flush()
     search.fit(X_flat, y_flat)
 
     print(f"\nBest Score: {search.best_score_:.4f}")  # type: ignore
     print(f"Best Parameters: {search.best_params_}")  # type: ignore
+    sys.stdout.flush()
 
     # Convert tuples back to lists in best_params (needed for bayesian search)
     best_params = {

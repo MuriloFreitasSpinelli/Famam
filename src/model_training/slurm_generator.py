@@ -62,6 +62,7 @@ echo "GPUs allocated: $SLURM_GPUS"
 # Set environment variables for TensorFlow
 export TF_CPP_MIN_LOG_LEVEL=1
 export TF_FORCE_GPU_ALLOW_GROWTH=true
+export PYTHONUNBUFFERED=1  # Ensure Python output is not buffered for SLURM logs
 
 # Navigate to project directory
 PROJECT_DIR="$HOME/Famam"
@@ -136,6 +137,7 @@ echo "Node ID: $SLURM_NODEID"
 # Set environment variables for TensorFlow
 export TF_CPP_MIN_LOG_LEVEL=1
 export TF_FORCE_GPU_ALLOW_GROWTH=true
+export PYTHONUNBUFFERED=1  # Ensure Python output is not buffered for SLURM logs
 
 # Navigate to project directory
 PROJECT_DIR="$HOME/Famam"
@@ -230,6 +232,7 @@ echo "Job ID: $SLURM_JOB_ID"
 # Set environment variables
 export TF_CPP_MIN_LOG_LEVEL=1
 export TF_FORCE_GPU_ALLOW_GROWTH=true
+export PYTHONUNBUFFERED=1  # Ensure Python output is not buffered for SLURM logs
 
 # Navigate to project directory
 PROJECT_DIR="$HOME/Famam"
