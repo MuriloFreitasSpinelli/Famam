@@ -5,32 +5,27 @@
   "cv_random_state": 42,
 
   "use_hyperparameter_tuning": true,
-  "tuning_method": "bayesian",
+  "tuning_method": "random_search",
 
   "param_grid": {
     "lstm_units": [
       [64],
       [128],
-      [256],
-      [384],
-      [128, 128],
-      [256, 128],
-      [256, 256],
-      [384, 256]
+      [64, 64],
+      [128, 64],
+      [128, 128]
     ],
     "dense_units": [
       [32],
       [64],
-      [128],
-      [256],
-      [128, 64],
-      [256, 128]
+      [64, 32],
+      [128, 64]
     ],
-    "dropout_rate": [0.1, 0.2, 0.3, 0.4, 0.5],
+    "dropout_rate": [0.1, 0.2, 0.3, 0.4],
     "learning_rate": [0.0001, 0.0003, 0.001, 0.003]
   },
 
-  "n_iter": 0,
+  "n_iter": 20,
   "bayesian_n_calls": 80,
   "bayesian_n_initial_points": 12,
 
@@ -38,6 +33,8 @@
   "tuning_scoring": "neg_mean_squared_error",
   "tuning_n_jobs": 1,
   "tuning_verbose": 2,
+  "tuning_batch_size": 8,
+  "tuning_epochs": 10,
 
   "output_dir": "./models/tuning/serious_bayes"
 }

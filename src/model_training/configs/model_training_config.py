@@ -40,7 +40,7 @@ class ModelTrainingConfig:
 
     # ============ Input Shape (from MusicDataset) ============
     num_pitches: int = 128  # MIDI pitch range
-    max_time_steps: int = 1000  # Must match MusicDataset.max_time_steps
+    max_time_steps: int = 512  # Must match MusicDataset.max_time_steps
     num_instruments: int = 129  # 0-127 programs + 128 for drums
 
     # ============ LSTM Architecture ============

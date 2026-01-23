@@ -136,6 +136,12 @@ def main():
     print(f"  Tracks: {dataset.count_tracks()}")
     print(f"  Genres: {list(dataset.vocabulary.genre_to_id.keys())}")
 
+    # Ensure max_time_steps matches the dataset
+    if config.max_time_steps != dataset.max_time_steps:
+        print(f"\nNote: Updating config max_time_steps from {config.max_time_steps} "
+              f"to {dataset.max_time_steps} to match dataset.")
+        config.max_time_steps = dataset.max_time_steps
+
     # Parse splits
     splits = tuple(float(x.strip()) for x in args.splits.split(','))
     if len(splits) != 3 or abs(sum(splits) - 1.0) > 0.001:

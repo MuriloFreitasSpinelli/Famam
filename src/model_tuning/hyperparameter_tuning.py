@@ -850,7 +850,7 @@ def tune_from_music_dataset(
     train_dataset: "tf.data.Dataset",
     config: ModelTuningConfig,
     num_genres: int,
-    input_shape: Tuple[int, int] = (128, 1000),
+    input_shape: Tuple[int, int] = (128, 512),
     max_samples: int = 1000,
     num_instruments: int = 129,
 ) -> Tuple[Any, Dict[str, Any]]:
@@ -934,7 +934,8 @@ def tune_from_music_dataset(
     # Use multi_input_config for the genre-conditioned model with 4 inputs
     wrapper = KerasRegressorWrapper(
         build_fn=build_fn,
-        epochs=10,  # Fewer epochs for tuning
+        epochs=config.tuning_epochs,
+        batch_size=config.tuning_batch_size,
         verbose=0,
         output_shape=input_shape,  # autoencoder-style: output same as input pianoroll
         multi_input_config=multi_input_config,

@@ -1,7 +1,7 @@
 {
   "model_name": "small_model",
   "num_pitches": 128,
-  "max_time_steps": 500,
+  "max_time_steps": 512,
   "num_instruments": 129,
   "lstm_units": [64],
   "dense_units": [32],

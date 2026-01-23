@@ -457,6 +457,12 @@ def run_distributed_training():
         print("Training cancelled.")
         return
 
+    # Ensure max_time_steps matches the dataset
+    if training_config.max_time_steps != dataset.max_time_steps:
+        print(f"\nNote: Updating config max_time_steps from {training_config.max_time_steps} "
+              f"to {dataset.max_time_steps} to match dataset.")
+        training_config.max_time_steps = dataset.max_time_steps
+
     # Get distribution config
     strategy, batch_size_per_replica = prompt_distribution_config()
 
@@ -775,6 +781,12 @@ def run_training_only():
     if training_config is None:
         print("Training cancelled.")
         return
+
+    # Ensure max_time_steps matches the dataset
+    if training_config.max_time_steps != dataset.max_time_steps:
+        print(f"\nNote: Updating config max_time_steps from {training_config.max_time_steps} "
+              f"to {dataset.max_time_steps} to match dataset.")
+        training_config.max_time_steps = dataset.max_time_steps
 
     # Confirm
     print_header("Training Summary")

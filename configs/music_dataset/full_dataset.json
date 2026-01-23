@@ -10,7 +10,7 @@
   "min_duration_seconds": null,
   "max_duration_seconds": null,
   "resolution": 24,
-  "max_time_steps": 1000,
+  "max_time_steps": 512,
   "max_samples": null,
   "random_seed": null,
   "verbose": true

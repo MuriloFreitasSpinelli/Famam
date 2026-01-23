@@ -39,7 +39,7 @@ class MusicDataset:
         self,
         config: Optional["MusicDatasetConfig"] = None,
         resolution: int = 24,
-        max_time_steps: int = 1000,
+        max_time_steps: int = 512,
     ):
         """
         Args:

@@ -34,7 +34,7 @@ class MusicDatasetConfig:
 
     # === Pianoroll Settings ===
     resolution: int = 24  # Ticks per quarter note
-    max_time_steps: int = 1000  # Fixed time dimension for pianorolls
+    max_time_steps: int = 512  # Fixed time dimension for pianorolls (matches segment_length)
 
     # === Processing Options ===
     max_samples: Optional[int] = None  # Limit samples (for testing)

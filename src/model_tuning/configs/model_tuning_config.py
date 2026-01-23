@@ -53,6 +53,8 @@ class ModelTuningConfig:
     tuning_scoring: str = 'neg_mean_squared_error'
     tuning_n_jobs: int = 1  # Number of parallel jobs (-1 for all CPUs, 1 for safe cluster use)
     tuning_verbose: int = 2
+    tuning_batch_size: int = 16  # Batch size for tuning (smaller to avoid OOM)
+    tuning_epochs: int = 10  # Epochs per trial during tuning
 
     # ============ Output Settings ============
     output_dir: str = './models'
