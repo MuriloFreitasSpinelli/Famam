@@ -59,7 +59,11 @@ export TF_CPP_MIN_LOG_LEVEL=1
 export TF_FORCE_GPU_ALLOW_GROWTH=true
 
 # Navigate to project directory
-cd {project_dir}
+# Derive project root from script location (script is in slurm_jobs/)
+SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+cd "$PROJECT_DIR"
+echo "Project directory: $PROJECT_DIR"
 
 # ============================================================
 # Copy dataset to local SSD ($TMPDIR) for faster I/O
@@ -127,6 +131,13 @@ echo "Node ID: $SLURM_NODEID"
 export TF_CPP_MIN_LOG_LEVEL=1
 export TF_FORCE_GPU_ALLOW_GROWTH=true
 
+# Navigate to project directory
+# Derive project root from script location (script is in slurm_jobs/)
+SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+cd "$PROJECT_DIR"
+echo "Node $SLURM_NODEID: Project directory: $PROJECT_DIR"
+
 # ============================================================
 # Copy dataset to local SSD ($TMPDIR) for faster I/O
 # Each node copies the dataset to its own local storage
@@ -165,9 +176,6 @@ done
 export TF_CONFIG='{{"cluster":{{"worker":['$WORKERS']}},"task":{{"type":"worker","index":'$SLURM_NODEID'}}}}'
 
 echo "TF_CONFIG: $TF_CONFIG"
-
-# Navigate to project directory
-cd {project_dir}
 
 # Run training with srun (using local dataset copy)
 echo "Starting distributed training..."
@@ -217,7 +225,11 @@ export TF_CPP_MIN_LOG_LEVEL=1
 export TF_FORCE_GPU_ALLOW_GROWTH=true
 
 # Navigate to project directory
-cd {project_dir}
+# Derive project root from script location (script is in slurm_jobs/)
+SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+cd "$PROJECT_DIR"
+echo "Project directory: $PROJECT_DIR"
 
 # ============================================================
 # Copy dataset to local SSD ($TMPDIR) for faster I/O

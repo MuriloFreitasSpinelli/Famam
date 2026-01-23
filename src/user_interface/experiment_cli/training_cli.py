@@ -416,6 +416,8 @@ def prompt_slurm_config() -> SlurmConfig:
     if get_bool("Enable email notifications?", default=False):
         email = get_input("Email address")
 
+    # output_dir: where to save the .sh script file locally (absolute path)
+    # log_dir: where SLURM writes logs on the cluster (relative path, used in script)
     config = SlurmConfig(
         job_name=job_name,
         partition=partition,
@@ -428,7 +430,7 @@ def prompt_slurm_config() -> SlurmConfig:
         module_loads=module_loads,
         email=email,
         output_dir=str(SLURM_JOBS_DIR),
-        log_dir=str(SLURM_LOGS_DIR),
+        log_dir="slurm_logs",
     )
 
     # Save config
@@ -599,13 +601,18 @@ def _generate_training_slurm_script(generator: SlurmScriptGenerator, slurm_confi
     strat_choice = get_choice(len(strategies), f"Select strategy [{default_strategy}]: ")
     strategy = strategies[strat_choice - 1] if strat_choice else strategies[default_strategy - 1]
 
+    # Convert absolute paths to relative paths (relative to project root)
+    # This ensures paths work on the cluster regardless of local machine paths
+    config_path_rel = config_path.relative_to(PROJECT_ROOT).as_posix()
+    dataset_path_rel = dataset_path.relative_to(PROJECT_ROOT).as_posix()
+
     # Generate script
     print("\n" + "=" * 60)
     script_path = generator.save_training_script(
-        config_path=str(config_path),
-        dataset_path=str(dataset_path),
+        config_path=config_path_rel,
+        dataset_path=dataset_path_rel,
         strategy=strategy,
-        project_dir=str(PROJECT_ROOT),
+        project_dir=".",
     )
 
     print("\nScript generated successfully!")
@@ -647,14 +654,20 @@ def _generate_tuning_slurm_script(generator: SlurmScriptGenerator, slurm_config:
 
     max_samples = get_int("Max samples for tuning", default=1000, min_val=100)
 
+    # Convert absolute paths to relative paths (relative to project root)
+    # This ensures paths work on the cluster regardless of local machine paths
+    tuning_config_path_rel = tuning_config_path.relative_to(PROJECT_ROOT).as_posix()
+    training_config_path_rel = training_config_path.relative_to(PROJECT_ROOT).as_posix()
+    dataset_path_rel = dataset_path.relative_to(PROJECT_ROOT).as_posix()
+
     # Generate script
     print("\n" + "=" * 60)
     script_path = generator.save_tuning_script(
-        tuning_config_path=str(tuning_config_path),
-        training_config_path=str(training_config_path),
-        dataset_path=str(dataset_path),
+        tuning_config_path=tuning_config_path_rel,
+        training_config_path=training_config_path_rel,
+        dataset_path=dataset_path_rel,
         max_samples=max_samples,
-        project_dir=str(PROJECT_ROOT),
+        project_dir=".",
     )
 
     print("\nScript generated successfully!")
