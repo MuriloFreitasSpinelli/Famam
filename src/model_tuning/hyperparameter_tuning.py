@@ -249,10 +249,9 @@ def create_lstm_model(
     Returns:
         Compiled Keras model
     """
-    if lstm_units is None:
-        lstm_units = [128, 64]
-    if dense_units is None:
-        dense_units = [64, 32]
+    # Ensure lstm_units and dense_units are lists (handles int/tuple from hyperparameter search)
+    lstm_units = _ensure_list(lstm_units, [128, 64])
+    dense_units = _ensure_list(dense_units, [64, 32])
 
     # Build regularizer
     if l1_reg > 0 and l2_reg > 0:
@@ -308,6 +307,19 @@ def create_lstm_model(
     return model
 
 
+def _ensure_list(value, default):
+    """Ensure value is a list, converting from int/tuple if needed."""
+    if value is None:
+        return default
+    if isinstance(value, (int, np.integer)):
+        return [int(value)]
+    if isinstance(value, tuple):
+        return list(value)
+    if isinstance(value, list):
+        return value
+    return default
+
+
 def create_genre_conditioned_lstm_model(
     input_shape: Tuple[int, int],
     output_shape: Tuple[int, int],
@@ -344,10 +356,9 @@ def create_genre_conditioned_lstm_model(
     Returns:
         Compiled Keras model with pianoroll, genre, instrument, and drum inputs
     """
-    if lstm_units is None:
-        lstm_units = [128, 64]
-    if dense_units is None:
-        dense_units = [64, 32]
+    # Ensure lstm_units and dense_units are lists (handles int/tuple from hyperparameter search)
+    lstm_units = _ensure_list(lstm_units, [128, 64])
+    dense_units = _ensure_list(dense_units, [64, 32])
 
     # Build regularizer
     if l1_reg > 0 and l2_reg > 0:
