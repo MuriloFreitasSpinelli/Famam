@@ -154,6 +154,11 @@ class ModelTrainingConfig:
 
     def __post_init__(self):
         """Validate configuration parameters."""
+        # Expand environment variables in paths (e.g., $HOME for cluster use)
+        import os
+        self.output_dir = os.path.expandvars(os.path.expanduser(self.output_dir))
+        self.tensorboard_log_dir = os.path.expandvars(os.path.expanduser(self.tensorboard_log_dir))
+
         # Validate optimizer
         if self.optimizer.lower() not in self.VALID_OPTIMIZERS:
             raise ValueError(
