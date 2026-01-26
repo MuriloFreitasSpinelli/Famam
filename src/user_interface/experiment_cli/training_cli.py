@@ -83,6 +83,13 @@ def prompt_training_config(is_tuned: bool = False) -> ModelTrainingConfig:
     epochs = get_int("Epochs", default=100, min_val=1)
     learning_rate = get_float("Learning rate", default=0.001, min_val=0.0)
 
+    print("\nGeneration training (input dropout):")
+    print("-" * 40)
+    print("Input dropout randomly zeros input during training, forcing the model")
+    print("to generate from conditioning (genre/instrument/drums) rather than just")
+    print("reconstructing input. This enables generation with zero seeds.")
+    input_dropout_rate = get_float("Input dropout rate", default=0.3, min_val=0.0, max_val=1.0)
+
     print("\nOptimizer:")
     optimizers = ["adam", "sgd", "rmsprop", "adamax", "nadam"]
     print_menu(optimizers, "Select optimizer:")
@@ -138,6 +145,7 @@ def prompt_training_config(is_tuned: bool = False) -> ModelTrainingConfig:
         batch_size=batch_size,
         epochs=epochs,
         learning_rate=learning_rate,
+        input_dropout_rate=input_dropout_rate,
         optimizer=optimizer,
         loss_function=loss_function,
         l1_reg=l1_reg,
@@ -262,6 +270,7 @@ def get_training_config(is_tuned: bool = False) -> Optional[ModelTrainingConfig]
             print(f"  LSTM units: {config.lstm_units}")
             print(f"  Epochs: {config.epochs}")
             print(f"  Learning rate: {config.learning_rate}")
+            print(f"  Input dropout rate: {config.input_dropout_rate}")
             return config
         return None
     elif choice == 2:
@@ -482,6 +491,7 @@ def run_distributed_training():
         print(f"Batch size per replica: {batch_size_per_replica}")
     else:
         print(f"Batch size: {training_config.batch_size}")
+    print(f"Input dropout rate: {training_config.input_dropout_rate}")
     print()
 
     if not confirm("Start distributed training?", default=True):
@@ -797,6 +807,7 @@ def run_training_only():
     print(f"Epochs: {training_config.epochs}")
     print(f"Batch size: {training_config.batch_size}")
     print(f"Learning rate: {training_config.learning_rate}")
+    print(f"Input dropout rate: {training_config.input_dropout_rate}")
     print()
 
     if not confirm("Start training?", default=True):

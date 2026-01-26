@@ -93,6 +93,9 @@ class MusicGenerator:
         drum_track: Optional[np.ndarray] = None,
         temperature: float = 1.0,
         threshold: float = 0.5,
+        use_dynamic_threshold: bool = True,
+        seed_density: float = 0.02,
+        verbose: bool = False,
     ) -> np.ndarray:
         """
         Generate a pianoroll conditioned on genre and instrument.
@@ -100,23 +103,37 @@ class MusicGenerator:
         Args:
             genre: Genre name for conditioning
             instrument: Instrument name for conditioning (General MIDI name)
-            seed: Optional seed pianoroll (128, time_steps). If None, uses zeros.
+            seed: Optional seed pianoroll (128, time_steps). If None, generates random sparse seed.
             drum_track: Optional drum pianoroll for alignment (128, time_steps)
             temperature: Sampling temperature (higher = more random)
-            threshold: Threshold for binarizing output (0-1)
+            threshold: Threshold for binarizing output (0-1). If use_dynamic_threshold
+                       is True, this is used as a percentile target instead.
+            use_dynamic_threshold: If True, use adaptive thresholding based on the
+                                   actual prediction distribution to ensure notes are generated.
+            seed_density: Density of random seed notes (0.0 = zeros, 0.02 = 2% random notes)
+            verbose: If True, print diagnostic info about predictions.
 
         Returns:
             Generated pianoroll array (128, time_steps)
         """
         # Create seed if not provided
         if seed is None:
-            seed = np.zeros(self.input_shape, dtype=np.float32)
+            if seed_density > 0:
+                # Use rhythmic pulse seed - structured pattern instead of random noise
+                # This creates a more musical foundation for the model to build on
+                seed = self._create_rhythmic_seed(seed_density)
+            else:
+                seed = np.zeros(self.input_shape, dtype=np.float32)
 
         # Validate seed shape
         if seed.shape != self.input_shape: # type: ignore
             raise ValueError(
                 f"Seed shape {seed.shape} doesn't match expected {self.input_shape}" # type: ignore
             )
+
+        if verbose:
+            seed_notes = int(seed.sum())
+            print(f"  Seed: {seed_notes} note activations across full time range")
 
         # Get prediction from model
         prediction = self.bundle.predict(
@@ -130,9 +147,29 @@ class MusicGenerator:
         if temperature != 1.0:
             prediction = self._apply_temperature(prediction, temperature)
 
+        if verbose:
+            print(f"  Raw prediction stats - min: {prediction.min():.4f}, "
+                  f"max: {prediction.max():.4f}, mean: {prediction.mean():.4f}")
+
         # Binarize using threshold
-        if threshold > 0:
+        if use_dynamic_threshold:
+            # Use dynamic threshold: take top N% of activations as notes
+            # This ensures we always get some notes regardless of model output scale
+            target_density = 0.02  # Target ~2% note density (sparse but musical)
+            dynamic_thresh = np.percentile(prediction, 100 * (1 - target_density))
+            # Ensure threshold is meaningful (at least 10% of max value)
+            min_threshold = 0.1 * prediction.max()
+            effective_threshold = max(dynamic_thresh, min_threshold)
+            if verbose:
+                print(f"  Dynamic threshold: {effective_threshold:.4f} "
+                      f"(targeting top {target_density*100:.0f}% of activations)")
+            prediction = (prediction > effective_threshold).astype(np.float32)
+        elif threshold > 0:
             prediction = (prediction > threshold).astype(np.float32)
+
+        if verbose:
+            note_count = int(prediction.sum())
+            print(f"  Generated {note_count} note activations")
 
         return prediction
 
@@ -229,6 +266,7 @@ class MusicGenerator:
         genre: str,
         temperature: float = 1.0,
         threshold: float = 0.5,
+        verbose: bool = True,
     ) -> Dict[str, np.ndarray]:
         """
         Generate a complete song with drums and other instruments.
@@ -240,6 +278,7 @@ class MusicGenerator:
             genre: Genre for conditioning (e.g., "rock", "jazz", "classical")
             temperature: Sampling temperature (higher = more random/creative)
             threshold: Threshold for binarizing output (0-1)
+            verbose: If True, print diagnostic info during generation
 
         Returns:
             Dict mapping instrument names to their generated pianorolls
@@ -255,6 +294,7 @@ class MusicGenerator:
             drum_track=None,
             temperature=temperature,
             threshold=threshold,
+            verbose=verbose,
         )
         tracks["Drums"] = drum_track
 
@@ -282,6 +322,7 @@ class MusicGenerator:
                 drum_track=drum_track,
                 temperature=temperature,
                 threshold=threshold,
+                verbose=verbose,
             )
             tracks[instrument] = instrument_track
 
@@ -296,6 +337,7 @@ class MusicGenerator:
         threshold: float = 0.5,
         resolution: int = 24,
         tempo: float = 120.0,
+        verbose: bool = True,
     ) -> muspy.Music:
         """
         Generate a complete song and save to MIDI file.
@@ -307,6 +349,7 @@ class MusicGenerator:
             threshold: Binarization threshold
             resolution: Ticks per beat
             tempo: Tempo in BPM
+            verbose: If True, print diagnostic info during generation
 
         Returns:
             Generated muspy.Music object with all tracks
@@ -316,6 +359,7 @@ class MusicGenerator:
             genre=genre,
             temperature=temperature,
             threshold=threshold,
+            verbose=verbose,
         )
 
         # Combine into Music object
@@ -331,6 +375,179 @@ class MusicGenerator:
         music.write_midi(str(output_path))
 
         print(f"Saved song to: {output_path}")
+        return music
+
+    def generate_extended_song(
+        self,
+        genre: str,
+        num_segments: int = 4,
+        temperature: float = 1.0,
+        threshold: float = 0.5,
+        verbose: bool = True,
+    ) -> Dict[str, np.ndarray]:
+        """
+        Generate an extended song by creating multiple segments and concatenating them.
+
+        Each segment uses the end of the previous segment as a seed for continuity.
+
+        Args:
+            genre: Genre for conditioning
+            num_segments: Number of segments to generate (total length = num_segments * max_time_steps)
+            temperature: Sampling temperature
+            threshold: Binarization threshold
+            verbose: Print progress info
+
+        Returns:
+            Dict mapping instrument names to their concatenated pianorolls
+        """
+        # Get instruments for this genre
+        genre_instruments = self.get_top_instruments_for_genre(
+            genre, top_n=3, exclude_drums=True
+        )
+        if not genre_instruments:
+            genre_instruments = [
+                "Acoustic Grand Piano",
+                "Electric Bass (finger)",
+                "Acoustic Guitar (steel)",
+            ]
+
+        all_instruments = ["Drums"] + genre_instruments
+        extended_tracks: Dict[str, List[np.ndarray]] = {inst: [] for inst in all_instruments}
+
+        # Generate first segment (no seed)
+        if verbose:
+            print(f"Generating segment 1/{num_segments}...")
+
+        # Generate drums first
+        drum_segment = self.generate(
+            genre=genre,
+            instrument="Drums",
+            seed=None,
+            drum_track=None,
+            temperature=temperature,
+            threshold=threshold,
+            verbose=verbose,
+        )
+        extended_tracks["Drums"].append(drum_segment)
+
+        # Generate other instruments aligned to drums
+        for instrument in genre_instruments:
+            if verbose:
+                print(f"  {instrument}...")
+            segment = self.generate(
+                genre=genre,
+                instrument=instrument,
+                seed=None,
+                drum_track=drum_segment,
+                temperature=temperature,
+                threshold=threshold,
+                verbose=verbose,
+            )
+            extended_tracks[instrument].append(segment)
+
+        # Generate subsequent segments using end of previous as seed
+        time_steps = self.input_shape[1]
+        seed_length = time_steps // 4  # Use last 25% as seed for continuity
+
+        for seg_idx in range(1, num_segments):
+            if verbose:
+                print(f"\nGenerating segment {seg_idx + 1}/{num_segments}...")
+
+            # Use end of previous drum segment as seed
+            prev_drum = extended_tracks["Drums"][-1]
+            drum_seed = np.zeros(self.input_shape, dtype=np.float32)
+            drum_seed[:, :seed_length] = prev_drum[:, -seed_length:]
+
+            drum_segment = self.generate(
+                genre=genre,
+                instrument="Drums",
+                seed=drum_seed,
+                drum_track=None,
+                temperature=temperature,
+                threshold=threshold,
+                verbose=verbose,
+            )
+            extended_tracks["Drums"].append(drum_segment)
+
+            # Generate other instruments
+            for instrument in genre_instruments:
+                if verbose:
+                    print(f"  {instrument}...")
+
+                prev_segment = extended_tracks[instrument][-1]
+                inst_seed = np.zeros(self.input_shape, dtype=np.float32)
+                inst_seed[:, :seed_length] = prev_segment[:, -seed_length:]
+
+                segment = self.generate(
+                    genre=genre,
+                    instrument=instrument,
+                    seed=inst_seed,
+                    drum_track=drum_segment,
+                    temperature=temperature,
+                    threshold=threshold,
+                    verbose=verbose,
+                )
+                extended_tracks[instrument].append(segment)
+
+        # Concatenate all segments
+        result: Dict[str, np.ndarray] = {}
+        for instrument, segments in extended_tracks.items():
+            result[instrument] = np.concatenate(segments, axis=1)
+
+        if verbose:
+            total_steps = num_segments * time_steps
+            print(f"\nGenerated extended song: {total_steps} time steps ({num_segments} segments)")
+
+        return result
+
+    def generate_extended_song_midi(
+        self,
+        genre: str,
+        output_path: str,
+        num_segments: int = 4,
+        temperature: float = 1.0,
+        threshold: float = 0.5,
+        resolution: int = 24,
+        tempo: float = 120.0,
+        verbose: bool = True,
+    ) -> muspy.Music:
+        """
+        Generate an extended song and save to MIDI.
+
+        Args:
+            genre: Genre for conditioning
+            output_path: Path to save MIDI file
+            num_segments: Number of segments (total length multiplier)
+            temperature: Sampling temperature
+            threshold: Binarization threshold
+            resolution: Ticks per beat
+            tempo: Tempo in BPM
+            verbose: Print progress info
+
+        Returns:
+            Generated muspy.Music object
+        """
+        tracks = self.generate_extended_song(
+            genre=genre,
+            num_segments=num_segments,
+            temperature=temperature,
+            threshold=threshold,
+            verbose=verbose,
+        )
+
+        # Combine into Music object
+        music = self.combine_tracks_to_music(
+            tracks=tracks,
+            resolution=resolution,
+            tempo=tempo,
+        )
+
+        # Save to MIDI
+        output_path = Path(output_path)  # type: ignore
+        output_path.parent.mkdir(parents=True, exist_ok=True)  # type: ignore
+        music.write_midi(str(output_path))
+
+        print(f"Saved extended song to: {output_path}")
         return music
 
     def generate_multi_instrument(
@@ -451,6 +668,62 @@ class MusicGenerator:
         logits = np.log(prediction / (1 - prediction))
         scaled_logits = logits / temperature
         return 1 / (1 + np.exp(-scaled_logits))
+
+    def _create_rhythmic_seed(self, density: float = 0.02) -> np.ndarray:
+        """
+        Create a structured rhythmic seed pattern instead of random noise.
+
+        This creates a more musical foundation with:
+        - Regular rhythmic pulses on beat positions
+        - Notes in common pitch ranges (bass, mid, high)
+        - Some variation to trigger different model responses
+
+        Args:
+            density: Approximate note density (0.01-0.05 typical)
+
+        Returns:
+            Seed pianoroll (128, time_steps)
+        """
+        num_pitches, time_steps = self.input_shape
+        seed = np.zeros((num_pitches, time_steps), dtype=np.float32)
+
+        # Assume 24 ticks per beat (standard resolution)
+        ticks_per_beat = 24
+        beats = time_steps // ticks_per_beat
+
+        # Create rhythmic pulses every beat and half-beat
+        for beat in range(beats):
+            beat_pos = beat * ticks_per_beat
+
+            # Strong beat - bass note (kick drum area for drums)
+            if beat % 4 == 0:  # Every 4 beats (downbeat)
+                # Bass range: 36-48 (C2-C3)
+                bass_pitch = np.random.randint(36, 48)
+                seed[bass_pitch, beat_pos:beat_pos + 4] = 1.0
+                # Kick drum pitch (35-36)
+                seed[36, beat_pos:beat_pos + 2] = 1.0
+
+            # Backbeat - snare area
+            if beat % 4 == 2:  # Beats 2 and 4
+                seed[38, beat_pos:beat_pos + 2] = 1.0  # Snare
+
+            # Hi-hat on every beat
+            if beat % 2 == 0:
+                seed[42, beat_pos:beat_pos + 1] = 1.0  # Closed hi-hat
+
+            # Add some melodic content in mid range
+            if np.random.random() < density * 10:
+                # Mid range: 60-72 (C4-C5)
+                mid_pitch = np.random.randint(60, 72)
+                note_length = np.random.randint(4, 12)
+                end_pos = min(beat_pos + note_length, time_steps)
+                seed[mid_pitch, beat_pos:end_pos] = 1.0
+
+        # Add some random sparse notes for variation
+        random_mask = np.random.random((num_pitches, time_steps)) > (1 - density * 0.5)
+        seed = np.maximum(seed, random_mask.astype(np.float32))
+
+        return seed
 
     def to_music(
         self,

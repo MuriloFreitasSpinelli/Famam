@@ -243,6 +243,7 @@ def run_generate_song(generator: MusicGenerator):
     # Generation parameters
     print("\nGeneration parameters:")
     print("-" * 40)
+    num_segments = get_int("Number of segments (more = longer song)", default=1, min_val=1, max_val=16)
     temperature = get_float("Temperature (higher = more random)", default=1.0, min_val=0.1, max_val=2.0)
     threshold = get_float("Threshold (for binarizing notes)", default=0.5, min_val=0.0, max_val=1.0)
     tempo = get_float("Tempo (BPM)", default=120.0, min_val=40.0, max_val=240.0)
@@ -255,13 +256,23 @@ def run_generate_song(generator: MusicGenerator):
     # Generate
     print(f"\nGenerating complete song for '{genre}'...")
     try:
-        music = generator.generate_song_midi(
-            genre=genre,
-            output_path=output_path,
-            temperature=temperature,
-            threshold=threshold,
-            tempo=tempo,
-        )
+        if num_segments > 1:
+            music = generator.generate_extended_song_midi(
+                genre=genre,
+                output_path=output_path,
+                num_segments=num_segments,
+                temperature=temperature,
+                threshold=threshold,
+                tempo=tempo,
+            )
+        else:
+            music = generator.generate_song_midi(
+                genre=genre,
+                output_path=output_path,
+                temperature=temperature,
+                threshold=threshold,
+                tempo=tempo,
+            )
 
         print(f"\nGenerated song saved to: {output_path}")
         print(f"  Tracks: {len(music.tracks)}")

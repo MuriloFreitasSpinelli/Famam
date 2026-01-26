@@ -65,6 +65,11 @@ class ModelTrainingConfig:
     loss_function: str = 'mse'
     metrics: List[str] = field(default_factory=lambda: ['mae'])
 
+    # Input dropout: probability of zeroing input pianoroll during training.
+    # Forces model to learn generation from conditioning (genre, instrument, drums)
+    # rather than just reconstructing input. Enables generation with zero seeds.
+    input_dropout_rate: float = 0.3
+
     # ============ Optimizer-specific Parameters ============
     # Adam optimizer
     beta_1: float = 0.9
@@ -194,6 +199,9 @@ class ModelTrainingConfig:
 
         if not 0 <= self.recurrent_dropout <= 1:
             raise ValueError(f"recurrent_dropout must be between 0 and 1, got {self.recurrent_dropout}")
+
+        if not 0 <= self.input_dropout_rate <= 1:
+            raise ValueError(f"input_dropout_rate must be between 0 and 1, got {self.input_dropout_rate}")
 
         # Validate batch size and epochs
         if self.batch_size <= 0:
@@ -331,6 +339,7 @@ class ModelTrainingConfig:
             f"  Epochs: {self.epochs}",
             f"  Loss Function: {self.loss_function}",
             f"  Metrics: {', '.join(self.metrics)}",
+            f"  Input Dropout Rate: {self.input_dropout_rate} (for conditioning-based generation)",
             "",
             "Regularization:",
             f"  L1: {self.l1_reg}, L2: {self.l2_reg}",

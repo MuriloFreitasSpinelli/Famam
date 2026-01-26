@@ -33,6 +33,24 @@ from .distribution_strategy import (
     get_strategy_info,
 )
 from ..core.vocabulary import Vocabulary
+
+
+def configure_gpu_memory():
+    """
+    Configure GPU memory growth to use all available VRAM.
+
+    By default TensorFlow allocates a conservative amount of GPU memory.
+    This enables memory growth so TensorFlow can use the full GPU capacity.
+    """
+    gpus = tf.config.list_physical_devices('GPU')
+    if gpus:
+        try:
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+            print(f"GPU memory growth enabled for {len(gpus)} GPU(s)")
+        except RuntimeError as e:
+            # Memory growth must be set before GPUs are initialized
+            print(f"Note: Could not set memory growth: {e}")
 # ModelBundle imported lazily in save_bundle() to avoid circular import
 
 
@@ -165,6 +183,9 @@ class ModelTrainer:
         self.num_genres = 0
         self.num_instruments = 129  # 0-127 + drums
 
+        # Configure GPU memory before any TensorFlow operations
+        configure_gpu_memory()
+
         # Setup distribution strategy
         self.strategy = self._setup_strategy()
         self.num_replicas = self.strategy.num_replicas_in_sync
@@ -209,6 +230,11 @@ class ModelTrainer:
         Formats samples to match model input names including instrument and drum conditioning.
         Applies distributed training options when using distribution strategies.
 
+        During training, randomly zeros out the input pianoroll (with probability
+        controlled by config.input_dropout_rate) to force the model to learn
+        generation from conditioning signals (genre, instrument, drums) alone.
+        This enables generation with zero/random seeds at inference time.
+
         Args:
             dataset: Input tf.data.Dataset
             batch_size: Batch size (will use global_batch_size for distributed)
@@ -218,17 +244,31 @@ class ModelTrainer:
         Returns:
             Prepared tf.data.Dataset
         """
+        input_dropout_rate = self.config.input_dropout_rate if is_training else 0.0
+
         def format_sample(sample):
             # Get drum pianoroll, default to zeros if not present
             drum_pianoroll = sample.get('drum_pianoroll', tf.zeros_like(sample['pianoroll']))
+            pianoroll = sample['pianoroll']
+
+            # During training, randomly zero out input to force conditioning-based generation
+            if input_dropout_rate > 0:
+                should_dropout = tf.random.uniform(()) < input_dropout_rate
+                pianoroll_input = tf.cond(
+                    should_dropout,
+                    lambda: tf.zeros_like(pianoroll),
+                    lambda: pianoroll
+                )
+            else:
+                pianoroll_input = pianoroll
 
             inputs = {
-                'pianoroll_input': sample['pianoroll'],
+                'pianoroll_input': pianoroll_input,
                 'genre_input': tf.reshape(sample['genre_id'], (1,)),
                 'instrument_input': tf.reshape(sample['instrument_id'], (1,)),
                 'drum_input': drum_pianoroll,
             }
-            # Target is the pianoroll (autoencoder-style reconstruction)
+            # Target is always the original pianoroll
             target = sample['pianoroll']
             return inputs, target
 
