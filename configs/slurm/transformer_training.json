@@ -1,0 +1,17 @@
+{
+  "job_name": "famam_transformer",
+  "partition": "gpu_a100_il",
+  "nodes": 1,
+  "gpus_per_node": 1,
+  "cpus_per_task": 8,
+  "memory_gb": 64,
+  "time_limit": "12:00:00",
+  "conda_env": "famam",
+  "module_loads": [],
+  "ntasks_per_node": 1,
+  "output_dir": "./slurm_jobs",
+  "log_dir": "./slurm_logs",
+  "exclusive": false,
+  "email": "murilodefreitasspinelli@gmail.com",
+  "email_type": "END,FAIL"
+}

@@ -9,6 +9,7 @@ import h5py # type: ignore
 import muspy # type: ignore
 
 from .vocabulary import Vocabulary
+from .event_vocabulary import EventVocabulary
 
 if TYPE_CHECKING:
     from ..data_processing.configs import MusicDatasetConfig
@@ -299,6 +300,208 @@ class MusicDataset:
 
         # Handle splits - group by base song ID to prevent data leakage
         # All segments from the same song must be in the same split
+        if random_state is not None:
+            np.random.seed(random_state)
+
+        # Group entry indices by base song ID
+        song_to_entries: Dict[str, List[int]] = {}
+        for entry_idx, entry in enumerate(self.entries):
+            base_song_id = self._get_base_song_id(entry.song_id)
+            if base_song_id not in song_to_entries:
+                song_to_entries[base_song_id] = []
+            song_to_entries[base_song_id].append(entry_idx)
+
+        # Shuffle the unique song IDs
+        unique_songs = list(song_to_entries.keys())
+        np.random.shuffle(unique_songs)
+
+        # Split at the song level
+        n_songs = len(unique_songs)
+        train_end = int(n_songs * splits[0])
+        val_end = train_end + int(n_songs * splits[1])
+
+        train_songs = set(unique_songs[:train_end])
+        val_songs = set(unique_songs[train_end:val_end])
+        test_songs = set(unique_songs[val_end:])
+
+        # Collect track indices for each split based on song membership
+        train_idx: List[Tuple[int, int]] = []
+        val_idx: List[Tuple[int, int]] = []
+        test_idx: List[Tuple[int, int]] = []
+
+        for entry_idx, entry in enumerate(self.entries):
+            base_song_id = self._get_base_song_id(entry.song_id)
+            for track_idx in range(len(entry.music.tracks)):
+                track_tuple = (entry_idx, track_idx)
+                if base_song_id in train_songs:
+                    train_idx.append(track_tuple)
+                elif base_song_id in val_songs:
+                    val_idx.append(track_tuple)
+                else:
+                    test_idx.append(track_tuple)
+
+        # Shuffle within each split
+        np.random.shuffle(train_idx)
+        np.random.shuffle(val_idx)
+        np.random.shuffle(test_idx)
+
+        return {
+            "train": tf.data.Dataset.from_generator(
+                lambda: generator(train_idx),
+                output_signature=output_signature,
+            ),
+            "validation": tf.data.Dataset.from_generator(
+                lambda: generator(val_idx),
+                output_signature=output_signature,
+            ),
+            "test": tf.data.Dataset.from_generator(
+                lambda: generator(test_idx),
+                output_signature=output_signature,
+            ),
+        }
+
+    def _track_to_events(
+        self,
+        track: muspy.Track,
+        music: muspy.Music,
+        encode_velocity: bool = False,
+    ) -> List[Tuple[str, int]]:
+        """
+        Convert a single track to event representation.
+
+        Converts notes to a sequence of note-on, note-off, and time-shift events.
+
+        Args:
+            track: MusPy Track object
+            music: Parent Music object (for resolution)
+            encode_velocity: Whether to include velocity events
+
+        Returns:
+            List of (event_type, value) tuples
+        """
+        if not track.notes:
+            return []
+
+        # Build list of all events: (time, event_type, pitch, velocity)
+        # event_type: 0 = note_on, 1 = note_off
+        all_events = []
+        for note in track.notes:
+            # Note-on event
+            all_events.append((note.time, 0, note.pitch, note.velocity))
+            # Note-off event
+            all_events.append((note.time + note.duration, 1, note.pitch, 0))
+
+        if not all_events:
+            return []
+
+        # Sort by time, then note-offs before note-ons at same time
+        all_events.sort(key=lambda x: (x[0], x[1]))
+
+        events = []
+        current_time = 0
+
+        for time, event_type, pitch, velocity in all_events:
+            # Clamp pitch to valid range
+            pitch = max(0, min(127, pitch))
+
+            # Add time shift if needed
+            time_diff = time - current_time
+            if time_diff > 0:
+                events.append(('time_shift', time_diff))
+                current_time = time
+
+            if event_type == 0:  # note_on
+                # Add velocity if requested
+                if encode_velocity and velocity > 0:
+                    events.append(('velocity', velocity))
+                events.append(('note_on', pitch))
+            else:  # note_off
+                events.append(('note_off', pitch))
+
+        return events
+
+    def to_event_tensorflow_dataset(
+        self,
+        event_vocab: EventVocabulary,
+        max_seq_length: int = 2048,
+        splits: Optional[Tuple[float, float, float]] = None,
+        random_state: Optional[int] = None,
+        encode_velocity: bool = False,
+    ) -> Union[tf.data.Dataset, Dict[str, tf.data.Dataset]]:
+        """
+        Convert to TensorFlow dataset with event sequences for Transformer training.
+
+        Each sample contains:
+            - 'input_ids': int32 (max_seq_length,) - token sequence
+            - 'attention_mask': int32 (max_seq_length,) - 1 for real tokens, 0 for padding
+            - 'labels': int32 (max_seq_length,) - input shifted by 1 for next-token prediction
+
+        Args:
+            event_vocab: EventVocabulary instance with genre/instrument counts configured
+            max_seq_length: Maximum sequence length including special tokens
+            splits: Optional (train, val, test) proportions
+            random_state: Random seed for reproducible splits
+            encode_velocity: Whether to include velocity tokens
+
+        Returns:
+            Single dataset if splits is None, otherwise dict with 'train', 'validation', 'test'
+        """
+        # Pre-flatten all tracks into a list of (entry_idx, track_idx)
+        track_indices: List[Tuple[int, int]] = []
+        for entry_idx, entry in enumerate(self.entries):
+            for track_idx in range(len(entry.music.tracks)):
+                track_indices.append((entry_idx, track_idx))
+
+        def generator(indices: List[Tuple[int, int]]):
+            for entry_idx, track_idx in indices:
+                entry = self.entries[entry_idx]
+                track = entry.music.tracks[track_idx]
+
+                # Skip empty tracks
+                if len(track.notes) == 0:
+                    continue
+
+                # Convert track to events
+                events = self._track_to_events(track, entry.music, encode_velocity)
+                if len(events) == 0:
+                    continue
+
+                # Get IDs
+                genre_id = self.vocabulary.get_genre_id(entry.genre)
+                instrument_id = self._get_instrument_id(track)
+
+                # Encode to token sequence
+                input_ids, attention_mask = event_vocab.encode_events_to_sequence(
+                    events=[(e[0], e[1]) for e in events],
+                    genre_id=genre_id,
+                    instrument_id=instrument_id,
+                    max_length=max_seq_length,
+                    encode_velocity=encode_velocity,
+                )
+
+                # Create labels (input shifted by 1)
+                # labels[i] = input_ids[i+1], with PAD at the end
+                labels = np.concatenate([input_ids[1:], [event_vocab.PAD_TOKEN]])
+
+                yield {
+                    "input_ids": input_ids,
+                    "attention_mask": attention_mask,
+                    "labels": labels.astype(np.int32),
+                }
+
+        output_signature = {
+            "input_ids": tf.TensorSpec(shape=(max_seq_length,), dtype=tf.int32),
+            "attention_mask": tf.TensorSpec(shape=(max_seq_length,), dtype=tf.int32),
+            "labels": tf.TensorSpec(shape=(max_seq_length,), dtype=tf.int32),
+        }
+
+        if splits is None:
+            return tf.data.Dataset.from_generator(
+                lambda: generator(track_indices),
+                output_signature=output_signature,
+            )
+
+        # Handle splits - group by base song ID to prevent data leakage
         if random_state is not None:
             np.random.seed(random_state)
 

@@ -1,9 +1,29 @@
 from .configs import ModelTrainingConfig
 from .configs.slurm_config import SlurmConfig
+from .configs.transformer_config import (
+    TransformerTrainingConfig,
+    get_small_config,
+    get_medium_config,
+    get_large_config,
+)
 from .model_trainer import (
     ModelTrainer,
     build_lstm_model,
     train_from_music_dataset,
+)
+from .transformer_model import (
+    MusicTransformer,
+    build_transformer_model,
+    build_transformer_from_config,
+    TransformerBlock,
+    TokenAndPositionEmbedding,
+)
+from .transformer_trainer import (
+    TransformerTrainer,
+    TransformerLRSchedule,
+    MaskedSparseCategoricalCrossentropy,
+    MaskedAccuracy,
+    train_transformer_from_music_dataset,
 )
 from .distribution_strategy import (
     DistributionStrategyFactory,
@@ -18,13 +38,30 @@ from .slurm_generator import (
 )
 
 __all__ = [
-    # Config
+    # LSTM Config
     'ModelTrainingConfig',
     'SlurmConfig',
-    # Training
+    # Transformer Config
+    'TransformerTrainingConfig',
+    'get_small_config',
+    'get_medium_config',
+    'get_large_config',
+    # LSTM Training
     'ModelTrainer',
     'build_lstm_model',
     'train_from_music_dataset',
+    # Transformer Model
+    'MusicTransformer',
+    'build_transformer_model',
+    'build_transformer_from_config',
+    'TransformerBlock',
+    'TokenAndPositionEmbedding',
+    # Transformer Training
+    'TransformerTrainer',
+    'TransformerLRSchedule',
+    'MaskedSparseCategoricalCrossentropy',
+    'MaskedAccuracy',
+    'train_transformer_from_music_dataset',
     # Distribution
     'DistributionStrategyFactory',
     'setup_tf_config',

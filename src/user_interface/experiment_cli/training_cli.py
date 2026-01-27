@@ -7,6 +7,7 @@ import json
 from src.core import MusicDataset, Vocabulary
 from src.model_training import ModelTrainingConfig, ModelTrainer, train_from_music_dataset
 from src.model_training.configs.slurm_config import SlurmConfig
+from src.model_training.configs.transformer_config import TransformerTrainingConfig
 from src.model_training.slurm_generator import SlurmScriptGenerator
 from src.model_tuning import ModelTuningConfig, tune_from_music_dataset
 
@@ -30,6 +31,7 @@ from .prompts import (
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent.resolve()
 CONFIGS_DIR = PROJECT_ROOT / "configs"
 TRAINING_CONFIG_DIR = CONFIGS_DIR / "model_training"
+TRANSFORMER_CONFIG_DIR = CONFIGS_DIR / "transformer_training"
 TUNING_CONFIG_DIR = CONFIGS_DIR / "model_tuning"
 SLURM_CONFIG_DIR = CONFIGS_DIR / "slurm"
 DATASET_DIR = PROJECT_ROOT / "data" / "datasets"
@@ -41,6 +43,7 @@ SLURM_LOGS_DIR = PROJECT_ROOT / "slurm_logs"
 def ensure_config_dirs():
     """Ensure all config directories exist."""
     TRAINING_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    TRANSFORMER_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     TUNING_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -167,6 +170,176 @@ def prompt_training_config(is_tuned: bool = False) -> ModelTrainingConfig:
     print(f"\nConfiguration saved to: {save_path}")
 
     return config
+
+
+def prompt_transformer_config() -> TransformerTrainingConfig:
+    """Interactively create a TransformerTrainingConfig."""
+    print_header("Create Transformer Training Configuration")
+
+    print("Model identification:")
+    print("-" * 40)
+
+    name = get_input("Model name", default="music_transformer")
+
+    print("\nTransformer architecture:")
+    print("-" * 40)
+
+    # Preset options for quick configuration
+    presets = [
+        ("Small (4 layers, 256 dim - fast training)", "small"),
+        ("Medium (6 layers, 512 dim - balanced)", "medium"),
+        ("Large (12 layers, 768 dim - high quality)", "large"),
+        ("Custom (configure manually)", "custom"),
+    ]
+    print("\nSelect architecture preset:")
+    for i, (desc, _) in enumerate(presets, 1):
+        print(f"  [{i}] {desc}")
+    print()
+
+    preset_choice = get_choice(len(presets))
+    preset = presets[preset_choice - 1][1]
+
+    if preset == "small":
+        max_seq_length = 512
+        num_layers = 4
+        d_model = 256
+        num_heads = 4
+        d_ff = 1024
+    elif preset == "medium":
+        max_seq_length = 1024
+        num_layers = 6
+        d_model = 512
+        num_heads = 8
+        d_ff = 2048
+    elif preset == "large":
+        max_seq_length = 1024
+        num_layers = 12
+        d_model = 768
+        num_heads = 12
+        d_ff = 3072
+    else:
+        # Custom configuration
+        max_seq_length = get_int("Max sequence length", default=2048, min_val=128)
+        num_layers = get_int("Number of transformer layers", default=6, min_val=1)
+        d_model = get_int("Model dimension (d_model)", default=512, min_val=64)
+        num_heads = get_int("Number of attention heads", default=8, min_val=1)
+        d_ff = get_int("Feed-forward dimension", default=2048, min_val=256)
+
+        # Validate d_model is divisible by num_heads
+        while d_model % num_heads != 0:
+            print(f"Warning: d_model ({d_model}) must be divisible by num_heads ({num_heads})")
+            d_model = get_int("Model dimension (d_model)", default=512, min_val=64)
+
+    dropout_rate = get_float("Dropout rate", default=0.1, min_val=0.0, max_val=0.5)
+
+    print("\nTraining hyperparameters:")
+    print("-" * 40)
+    batch_size = get_int("Batch size (reduce if OOM)", default=4, min_val=1)
+    epochs = get_int("Epochs", default=100, min_val=1)
+    learning_rate = get_float("Learning rate", default=0.0001, min_val=0.0)
+    warmup_steps = get_int("Warmup steps", default=4000, min_val=0)
+
+    print("\nLabel smoothing:")
+    print("-" * 40)
+    label_smoothing = get_float("Label smoothing", default=0.1, min_val=0.0, max_val=0.5)
+
+    print("\nOptimizer:")
+    optimizers = ["adam", "adamw", "sgd", "rmsprop"]
+    print_menu(optimizers, "Select optimizer:")
+    opt_choice = get_choice(len(optimizers))
+    optimizer = optimizers[opt_choice - 1]
+
+    weight_decay = 0.01
+    if optimizer == "adamw":
+        weight_decay = get_float("Weight decay", default=0.01, min_val=0.0)
+
+    print("\nLearning rate schedule:")
+    print("-" * 40)
+    use_transformer_lr_schedule = get_bool("Use Transformer LR schedule (warmup + decay)?", default=True)
+
+    print("\nRegularization:")
+    print("-" * 40)
+    use_gradient_clipping = get_bool("Use gradient clipping", default=True)
+    gradient_clip_value = 1.0
+    if use_gradient_clipping:
+        gradient_clip_value = get_float("Gradient clip value", default=1.0, min_val=0.0)
+
+    print("\nEarly stopping:")
+    print("-" * 40)
+    use_early_stopping = get_bool("Use early stopping", default=True)
+    early_stopping_patience = 10
+    if use_early_stopping:
+        early_stopping_patience = get_int("Early stopping patience", default=10, min_val=1)
+
+    print("\nCheckpointing:")
+    print("-" * 40)
+    use_checkpointing = get_bool("Save checkpoints", default=True)
+
+    print("\nTensorBoard:")
+    print("-" * 40)
+    use_tensorboard = get_bool("Use TensorBoard logging", default=True)
+
+    config = TransformerTrainingConfig(
+        model_name=name,
+        max_seq_length=max_seq_length,
+        num_layers=num_layers,
+        d_model=d_model,
+        num_heads=num_heads,
+        d_ff=d_ff,
+        dropout_rate=dropout_rate,
+        batch_size=batch_size,
+        epochs=epochs,
+        learning_rate=learning_rate,
+        warmup_steps=warmup_steps,
+        label_smoothing=label_smoothing,
+        optimizer=optimizer,
+        weight_decay=weight_decay,
+        use_transformer_lr_schedule=use_transformer_lr_schedule,
+        use_gradient_clipping=use_gradient_clipping,
+        gradient_clip_value=gradient_clip_value,
+        use_early_stopping=use_early_stopping,
+        early_stopping_patience=early_stopping_patience,
+        use_checkpointing=use_checkpointing,
+        use_tensorboard=use_tensorboard,
+        output_dir=str(MODELS_DIR),
+    )
+
+    # Always save config
+    ensure_config_dirs()
+    save_path = TRANSFORMER_CONFIG_DIR / f"{name}.json"
+    config.save(str(save_path))
+    print(f"\nConfiguration saved to: {save_path}")
+
+    return config
+
+
+def get_transformer_config() -> Optional[TransformerTrainingConfig]:
+    """Get TransformerTrainingConfig either from file or by creating new one."""
+    print_header("Transformer Training Configuration")
+
+    options = [
+        "Load existing config",
+        "Create new config",
+        "Back",
+    ]
+    print_menu(options)
+    choice = get_choice(len(options))
+
+    if choice == 1:
+        ensure_config_dirs()
+        config_path = select_config_file(TRANSFORMER_CONFIG_DIR, "transformer training")
+        if config_path:
+            config = TransformerTrainingConfig.load(str(config_path))
+            print(f"\nLoaded config: {config.model_name}")
+            print(f"  Architecture: {config.num_layers} layers, d_model={config.d_model}")
+            print(f"  Epochs: {config.epochs}")
+            print(f"  Learning rate: {config.learning_rate}")
+            return config
+        return None
+    elif choice == 2:
+        return prompt_transformer_config()
+    else:
+        return None
 
 
 def prompt_tuning_config() -> ModelTuningConfig:
@@ -850,6 +1023,92 @@ def run_training_only():
     input("\nPress Enter to continue...")
 
 
+def run_transformer_training():
+    """Run Transformer model training."""
+    print_header("Transformer Model Training")
+
+    # Select dataset
+    dataset = select_dataset()
+    if dataset is None:
+        return
+
+    # Get transformer training config
+    training_config = get_transformer_config()
+    if training_config is None:
+        print("Training cancelled.")
+        return
+
+    # Show configuration summary
+    print_header("Transformer Training Summary")
+    print(f"Model: {training_config.model_name}")
+    print(f"Dataset: {len(dataset)} entries, {dataset.count_tracks()} tracks")
+    print(f"Architecture: {training_config.num_layers} layers, d_model={training_config.d_model}")
+    print(f"Attention heads: {training_config.num_heads}")
+    print(f"Max sequence length: {training_config.max_seq_length}")
+    print(f"Epochs: {training_config.epochs}")
+    print(f"Batch size: {training_config.batch_size}")
+    print(f"Learning rate: {training_config.learning_rate}")
+    print(f"Warmup steps: {training_config.warmup_steps}")
+    print()
+
+    if not confirm("Start Transformer training?", default=True):
+        print("Training cancelled.")
+        return
+
+    # Import transformer trainer
+    from src.model_training.transformer_trainer import TransformerTrainer
+    from src.core.event_vocabulary import EventVocabulary
+
+    # Create event vocabulary
+    event_vocab = EventVocabulary(
+        num_genres=dataset.vocabulary.num_genres,
+        num_instruments=dataset.vocabulary.num_instruments,
+    )
+
+    print(f"\nEvent vocabulary size: {event_vocab.vocab_size}")
+
+    # Convert dataset to event format
+    print("\nConverting dataset to event sequences...")
+    splits = (0.8, 0.1, 0.1)
+    datasets = dataset.to_event_tensorflow_dataset(
+        event_vocab=event_vocab,
+        splits=splits,
+        max_seq_length=training_config.max_seq_length,
+        random_state=42,
+    )
+
+    print(f"  Train/Val/Test split: {splits}")
+
+    # Run training
+    print("\n" + "=" * 60)
+    print("Starting Transformer training...")
+    print("=" * 60 + "\n")
+
+    try:
+        trainer = TransformerTrainer(training_config, event_vocab)
+
+        model, history = trainer.train(
+            train_dataset=datasets['train'],
+            val_dataset=datasets['validation'],
+        )
+
+        print("\n" + "=" * 60)
+        print("Training complete!")
+        print("=" * 60)
+
+        # Save model bundle
+        if confirm("\nSave model bundle for generation?", default=True):
+            bundle_path = MODELS_DIR / training_config.model_name / "model_bundle"
+            trainer.save_bundle(str(bundle_path), dataset.vocabulary)
+            print(f"Model bundle saved to: {bundle_path}.h5")
+
+    except Exception as e:
+        print(f"\nError during training: {e}")
+        raise
+
+    input("\nPress Enter to continue...")
+
+
 def run_tuning_then_training():
     """Run hyperparameter tuning followed by training with best params."""
     print_header("Tune & Train Pipeline")
@@ -978,9 +1237,10 @@ def run_tune_model():
         print_header("Model Tuning & Training")
 
         options = [
-            "Tune only (hyperparameter search)",
-            "Train only (use existing config)",
-            "Tune then Train (full pipeline)",
+            "Train LSTM model (pianoroll-based)",
+            "Train Transformer model (event-based, autoregressive)",
+            "Tune only (LSTM hyperparameter search)",
+            "Tune then Train (LSTM full pipeline)",
             "Distributed Training (multi-GPU/multi-node)",
             "Generate SLURM Script (for cluster)",
             "Back to main menu",
@@ -989,14 +1249,16 @@ def run_tune_model():
         choice = get_choice(len(options))
 
         if choice == 1:
-            run_tuning_only()
-        elif choice == 2:
             run_training_only()
+        elif choice == 2:
+            run_transformer_training()
         elif choice == 3:
-            run_tuning_then_training()
+            run_tuning_only()
         elif choice == 4:
-            run_distributed_training()
+            run_tuning_then_training()
         elif choice == 5:
-            run_slurm_generator()
+            run_distributed_training()
         elif choice == 6:
+            run_slurm_generator()
+        elif choice == 7:
             break

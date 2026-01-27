@@ -2,7 +2,6 @@
 data/midi/
 logs/
 slurm_logs/
-output/
 models/
 
 # Byte-compiled / optimized / DLL files

@@ -1,19 +1,24 @@
 """
-Music generator using trained LSTM models.
+Music generator using trained LSTM and Transformer models.
 
 Generates pianoroll predictions and converts them to MIDI via muspy.
 Supports genre and instrument conditioning for style-specific generation.
 Can generate individual instrument tracks and combine them into a full piece.
+
+For Transformer models, uses autoregressive token generation with various
+sampling strategies (temperature, top-k, top-p).
 """
 
 import numpy as np  # type: ignore
-from typing import Optional, List, Tuple, Dict
+from typing import Optional, List, Tuple, Dict, Union
 from pathlib import Path
 
+import tensorflow as tf  # type: ignore
 import muspy  # type: ignore
 
-from ..core.model_bundle import ModelBundle
+from ..core.model_bundle import ModelBundle, TransformerModelBundle, load_model_bundle
 from ..core.vocabulary import Vocabulary, GENERAL_MIDI_INSTRUMENTS
+from ..core.event_vocabulary import EventVocabulary
 
 
 class MusicGenerator:
@@ -116,6 +121,8 @@ class MusicGenerator:
         Returns:
             Generated pianoroll array (128, time_steps)
         """
+        is_drum = (instrument == "Drums")
+
         # Create seed if not provided
         if seed is None:
             if seed_density > 0:
@@ -152,10 +159,11 @@ class MusicGenerator:
                   f"max: {prediction.max():.4f}, mean: {prediction.mean():.4f}")
 
         # Binarize using threshold
+        # Use higher density for drums to ensure consistent patterns
+        target_density = 0.08 if is_drum else 0.03
+
         if use_dynamic_threshold:
             # Use dynamic threshold: take top N% of activations as notes
-            # This ensures we always get some notes regardless of model output scale
-            target_density = 0.02  # Target ~2% note density (sparse but musical)
             dynamic_thresh = np.percentile(prediction, 100 * (1 - target_density))
             # Ensure threshold is meaningful (at least 10% of max value)
             min_threshold = 0.1 * prediction.max()
@@ -167,9 +175,26 @@ class MusicGenerator:
         elif threshold > 0:
             prediction = (prediction > threshold).astype(np.float32)
 
+        # Post-processing to reduce noise and create cleaner output
+        # 1. Remove isolated single-timestep notes (noise)
+        prediction = self._remove_isolated_notes(prediction, min_neighbors=1)
+
+        # 2. Merge short choppy notes into sustained notes
+        if is_drum:
+            # For drums: shorter notes are OK, but ensure coverage
+            prediction = self._merge_short_notes(prediction, min_note_length=2, max_gap=1)
+            prediction = self._ensure_drum_coverage(prediction, min_density=0.03)
+        else:
+            # For melodic instruments: longer sustained notes
+            prediction = self._merge_short_notes(prediction, min_note_length=6, max_gap=3)
+
+        # 3. Limit simultaneous notes to reduce noise
+        max_simultaneous = 8 if is_drum else 4
+        prediction = self._limit_simultaneous_notes(prediction, max_notes=max_simultaneous)
+
         if verbose:
             note_count = int(prediction.sum())
-            print(f"  Generated {note_count} note activations")
+            print(f"  Generated {note_count} note activations (after cleanup)")
 
         return prediction
 
@@ -669,6 +694,186 @@ class MusicGenerator:
         scaled_logits = logits / temperature
         return 1 / (1 + np.exp(-scaled_logits))
 
+    def _merge_short_notes(
+        self,
+        pianoroll: np.ndarray,
+        min_note_length: int = 4,
+        max_gap: int = 2,
+    ) -> np.ndarray:
+        """
+        Merge short choppy notes into longer sustained notes.
+
+        This fixes the issue where the model outputs sparse activations
+        that get converted to many tiny notes instead of musical phrases.
+
+        Args:
+            pianoroll: Binary pianoroll (128, time_steps)
+            min_note_length: Minimum note length in time steps. Shorter notes are extended.
+            max_gap: Maximum gap (in time steps) to bridge between notes of same pitch.
+
+        Returns:
+            Cleaned pianoroll with merged notes
+        """
+        num_pitches, time_steps = pianoroll.shape
+        result = pianoroll.copy()
+
+        for pitch in range(num_pitches):
+            row = result[pitch]
+
+            # Find note onsets and offsets
+            # Pad to detect edges
+            padded = np.concatenate([[0], row, [0]])
+            onsets = np.where(np.diff(padded) == 1)[0]
+            offsets = np.where(np.diff(padded) == -1)[0]
+
+            if len(onsets) == 0:
+                continue
+
+            # First pass: extend short notes to minimum length
+            for onset, offset in zip(onsets, offsets):
+                note_length = offset - onset
+                if note_length < min_note_length:
+                    # Extend note to minimum length
+                    new_offset = min(onset + min_note_length, time_steps)
+                    result[pitch, onset:new_offset] = 1.0
+
+            # Second pass: bridge small gaps between notes
+            row = result[pitch]
+            padded = np.concatenate([[0], row, [0]])
+            onsets = np.where(np.diff(padded) == 1)[0]
+            offsets = np.where(np.diff(padded) == -1)[0]
+
+            for i in range(len(offsets) - 1):
+                gap = onsets[i + 1] - offsets[i]
+                if gap <= max_gap:
+                    # Bridge the gap
+                    result[pitch, offsets[i]:onsets[i + 1]] = 1.0
+
+        return result
+
+    def _remove_isolated_notes(
+        self,
+        pianoroll: np.ndarray,
+        min_neighbors: int = 1,
+    ) -> np.ndarray:
+        """
+        Remove isolated note activations that are likely noise.
+
+        A note activation is considered isolated if it doesn't have enough
+        neighboring activations (in time or pitch).
+
+        Args:
+            pianoroll: Binary pianoroll (128, time_steps)
+            min_neighbors: Minimum number of neighbors required to keep a note
+
+        Returns:
+            Cleaned pianoroll
+        """
+        from scipy import ndimage  # type: ignore
+
+        # Create a kernel that counts neighbors (3x3 window excluding center)
+        kernel = np.array([
+            [0, 1, 0],
+            [1, 0, 1],
+            [0, 1, 0]
+        ])
+
+        # Count neighbors for each cell
+        neighbor_count = ndimage.convolve(pianoroll.astype(float), kernel, mode='constant')
+
+        # Keep only notes with enough neighbors
+        result = pianoroll * (neighbor_count >= min_neighbors)
+
+        return result.astype(np.float32)
+
+    def _limit_simultaneous_notes(
+        self,
+        pianoroll: np.ndarray,
+        max_notes: int = 4,
+    ) -> np.ndarray:
+        """
+        Limit the number of simultaneous notes at each time step.
+
+        Keeps the highest-activation notes (or lowest pitches for ties).
+
+        Args:
+            pianoroll: Binary pianoroll (128, time_steps)
+            max_notes: Maximum simultaneous notes allowed
+
+        Returns:
+            Filtered pianoroll
+        """
+        result = pianoroll.copy()
+        num_pitches, time_steps = pianoroll.shape
+
+        for t in range(time_steps):
+            active_pitches = np.where(result[:, t] > 0)[0]
+
+            if len(active_pitches) > max_notes:
+                # Keep the lowest pitches (bass notes are usually more important)
+                # and some higher ones for melody
+                pitches_to_keep = np.concatenate([
+                    active_pitches[:max_notes // 2],  # Keep lowest
+                    active_pitches[-(max_notes - max_notes // 2):]  # Keep highest
+                ])
+                pitches_to_remove = np.setdiff1d(active_pitches, pitches_to_keep)
+                result[pitches_to_remove, t] = 0
+
+        return result
+
+    def _ensure_drum_coverage(
+        self,
+        pianoroll: np.ndarray,
+        min_density: float = 0.05,
+    ) -> np.ndarray:
+        """
+        Ensure drums have adequate coverage throughout the duration.
+
+        Args:
+            pianoroll: Drum pianoroll (128, time_steps)
+            min_density: Minimum note density to ensure
+
+        Returns:
+            Enhanced drum pianoroll
+        """
+        num_pitches, time_steps = pianoroll.shape
+        result = pianoroll.copy()
+
+        # Common drum pitches (General MIDI)
+        kick = 36
+        snare = 38
+        closed_hihat = 42
+        open_hihat = 46
+
+        # Check if drums are too sparse
+        current_density = result.sum() / (num_pitches * time_steps)
+
+        if current_density < min_density:
+            # Add basic drum pattern as foundation
+            ticks_per_beat = 24  # Assuming standard resolution
+            beats = time_steps // ticks_per_beat
+
+            for beat in range(beats):
+                beat_pos = beat * ticks_per_beat
+
+                # Kick on 1 and 3 (every 2 beats in 4/4)
+                if beat % 2 == 0:
+                    result[kick, beat_pos:beat_pos + 6] = 1.0
+
+                # Snare on 2 and 4
+                if beat % 2 == 1:
+                    result[snare, beat_pos:beat_pos + 4] = 1.0
+
+                # Hi-hat on every beat
+                result[closed_hihat, beat_pos:beat_pos + 2] = 1.0
+
+                # Hi-hat on off-beats too for groove
+                half_beat = beat_pos + ticks_per_beat // 2
+                if half_beat < time_steps:
+                    result[closed_hihat, half_beat:half_beat + 2] = 1.0
+
+        return result
+
     def _create_rhythmic_seed(self, density: float = 0.02) -> np.ndarray:
         """
         Create a structured rhythmic seed pattern instead of random noise.
@@ -731,6 +936,7 @@ class MusicGenerator:
         resolution: int = 24,
         tempo: float = 120.0,
         program: int = 0,
+        is_drum: bool = False,
     ) -> muspy.Music:
         """
         Convert pianoroll to muspy Music object.
@@ -739,7 +945,8 @@ class MusicGenerator:
             pianoroll: Pianoroll array (128, time_steps)
             resolution: Ticks per beat
             tempo: Tempo in BPM
-            program: MIDI program number (instrument)
+            program: MIDI program number (instrument), 128 for drums
+            is_drum: Whether this is a drum track
 
         Returns:
             muspy.Music object
@@ -760,9 +967,13 @@ class MusicGenerator:
         # Set tempo
         music.tempos = [muspy.Tempo(time=0, qpm=tempo)]
 
+        # Handle drums: program 128 is internal, MIDI needs 0-127
+        is_drum = is_drum or program == 128
+
         # Set program for all tracks
         for track in music.tracks:
-            track.program = program
+            track.program = 0 if is_drum else program
+            track.is_drum = is_drum
 
         return music
 
@@ -809,6 +1020,7 @@ class MusicGenerator:
 
         # Get program number
         program = INSTRUMENT_NAME_TO_ID.get(instrument, 0)
+        is_drum = (instrument == "Drums" or program == 128)
 
         # Convert to Music
         music = self.to_music(
@@ -816,6 +1028,7 @@ class MusicGenerator:
             resolution=resolution,
             tempo=tempo,
             program=program,
+            is_drum=is_drum,
         )
 
         # Save to MIDI
@@ -915,6 +1128,7 @@ class MusicGenerator:
         output_dir.mkdir(parents=True, exist_ok=True) # type: ignore
 
         program = INSTRUMENT_NAME_TO_ID.get(instrument, 0)
+        is_drum = (instrument == "Drums" or program == 128)
 
         pianorolls = self.generate_multiple(
             genre=genre,
@@ -932,6 +1146,7 @@ class MusicGenerator:
                 resolution=resolution,
                 tempo=tempo,
                 program=program,
+                is_drum=is_drum,
             )
 
             # Clean instrument name for filename
@@ -946,6 +1161,672 @@ class MusicGenerator:
     def summary(self) -> str:
         """Get summary of generator configuration."""
         return self.bundle.summary()
+
+
+# ============================================================================
+# Transformer Music Generator (Autoregressive)
+# ============================================================================
+
+class TransformerMusicGenerator:
+    """
+    Generate music using a trained Transformer model with autoregressive decoding.
+
+    Uses TransformerModelBundle which contains the trained model, event vocabulary,
+    and configuration needed for generation.
+    """
+
+    def __init__(self, bundle: TransformerModelBundle):
+        """
+        Initialize generator with a trained transformer bundle.
+
+        Args:
+            bundle: TransformerModelBundle containing model, vocabularies, and config
+        """
+        self.bundle = bundle
+        self.model = bundle.model
+        self.event_vocab = bundle.event_vocabulary
+        self.vocabulary = bundle.vocabulary
+        self.max_seq_length = bundle.max_seq_length
+
+    @classmethod
+    def from_bundle_path(cls, filepath: str) -> 'TransformerMusicGenerator':
+        """
+        Load generator from saved bundle file.
+
+        Args:
+            filepath: Path to the .h5 bundle file
+
+        Returns:
+            TransformerMusicGenerator instance
+        """
+        bundle = TransformerModelBundle.load(filepath)
+        return cls(bundle)
+
+    def list_genres(self) -> List[str]:
+        """List available genres for conditioning."""
+        return self.bundle.list_genres()
+
+    def list_instruments(self) -> List[str]:
+        """List all available instruments (General MIDI)."""
+        return self.bundle.list_instruments()
+
+    def list_active_instruments(self) -> List[str]:
+        """List instruments that are actually used in training data."""
+        active_ids = [
+            i for i in range(129)
+            if len(self.vocabulary.instrument_to_songs.get(i, set())) > 0
+        ]
+        return [GENERAL_MIDI_INSTRUMENTS[i] for i in active_ids if i in GENERAL_MIDI_INSTRUMENTS]
+
+    def get_instruments_for_genre(self, genre: str) -> List[str]:
+        """Get instruments commonly used in a specific genre."""
+        instrument_ids = self.vocabulary.get_instruments_for_genre(genre)
+        return [GENERAL_MIDI_INSTRUMENTS[i] for i in instrument_ids if i in GENERAL_MIDI_INSTRUMENTS]
+
+    def get_top_instruments_for_genre(
+        self,
+        genre: str,
+        top_n: int = 3,
+        exclude_drums: bool = True
+    ) -> List[str]:
+        """Get top N most frequently used instruments for a genre."""
+        instrument_ids = self.vocabulary.get_top_instruments_for_genre(
+            genre, top_n, exclude_drums
+        )
+        return [GENERAL_MIDI_INSTRUMENTS[i] for i in instrument_ids if i in GENERAL_MIDI_INSTRUMENTS]
+
+    def generate(
+        self,
+        genre: str,
+        instrument: str = "Acoustic Grand Piano",
+        max_length: Optional[int] = None,
+        min_length: int = 200,
+        temperature: float = 1.0,
+        top_k: int = 0,
+        top_p: float = 0.0,
+        repetition_penalty: float = 1.0,
+        eos_penalty: float = 2.0,
+        seed: Optional[int] = None,
+        verbose: bool = False,
+    ) -> np.ndarray:
+        """
+        Generate a sequence of music events autoregressively.
+
+        Args:
+            genre: Genre name for conditioning
+            instrument: Instrument name for conditioning (General MIDI name)
+            max_length: Maximum sequence length (default: model's max_seq_length)
+            min_length: Minimum sequence length before allowing EOS (prevents early stopping)
+            temperature: Sampling temperature (higher = more random)
+            top_k: If > 0, only sample from top k tokens
+            top_p: If > 0, use nucleus sampling with this probability threshold
+            repetition_penalty: Penalty for repeated tokens (> 1 reduces repetition)
+            eos_penalty: Penalty for EOS token before min_length (higher = longer sequences)
+            seed: Random seed for reproducibility
+            verbose: If True, print generation progress
+
+        Returns:
+            Array of generated token IDs
+        """
+        if seed is not None:
+            np.random.seed(seed)
+            tf.random.set_seed(seed)
+
+        if max_length is None:
+            max_length = self.max_seq_length
+
+        # Create starting sequence: [BOS, GENRE, INSTRUMENT]
+        start_tokens = self.bundle.create_start_sequence(genre, instrument)
+        generated = list(start_tokens)
+
+        if verbose:
+            print(f"Generating {instrument} in {genre} style...")
+            print(f"  Max length: {max_length}, Min length: {min_length}, Temperature: {temperature}")
+
+        # Generate tokens one at a time
+        for step in range(len(start_tokens), max_length):
+            # Prepare input (batch of 1)
+            input_ids = np.array([generated], dtype=np.int32)
+
+            # Get logits from model
+            logits = self.model.predict(input_ids, verbose=0)
+
+            # Get logits for next token (last position)
+            next_token_logits = logits[0, -1, :]  # Shape: (vocab_size,)
+
+            # Apply repetition penalty
+            if repetition_penalty != 1.0:
+                for token in set(generated):
+                    next_token_logits[token] /= repetition_penalty
+
+            # Apply EOS penalty before min_length to prevent early stopping
+            # This is critical for models trained on short sequences
+            if len(generated) < min_length and eos_penalty > 1.0:
+                next_token_logits[self.event_vocab.EOS_TOKEN] /= eos_penalty
+
+            # Apply temperature
+            if temperature != 1.0:
+                next_token_logits = next_token_logits / temperature
+
+            # Convert to probabilities
+            probs = self._softmax(next_token_logits)
+
+            # Apply top-k filtering
+            if top_k > 0:
+                probs = self._top_k_filter(probs, top_k)
+
+            # Apply nucleus (top-p) sampling
+            if top_p > 0:
+                probs = self._top_p_filter(probs, top_p)
+
+            # Re-normalize probabilities
+            probs = probs / probs.sum()
+
+            # Sample next token
+            next_token = np.random.choice(len(probs), p=probs)
+            generated.append(int(next_token))
+
+            # Check for EOS - only stop if we've reached min_length
+            if next_token == self.event_vocab.EOS_TOKEN:
+                if len(generated) >= min_length:
+                    if verbose:
+                        print(f"  EOS reached at step {step}")
+                    break
+                else:
+                    # Remove the EOS and continue generating
+                    generated.pop()
+                    if verbose and step % 50 == 0:
+                        print(f"  Ignoring early EOS at step {step}, continuing...")
+
+            # Progress indicator
+            if verbose and step % 100 == 0:
+                print(f"  Generated {step}/{max_length} tokens...")
+
+        if verbose:
+            print(f"  Generated {len(generated)} tokens total")
+
+        return np.array(generated, dtype=np.int32)
+
+    def generate_pianoroll(
+        self,
+        genre: str,
+        instrument: str = "Acoustic Grand Piano",
+        max_length: Optional[int] = None,
+        min_length: int = 200,
+        temperature: float = 1.0,
+        top_k: int = 50,
+        top_p: float = 0.9,
+        repetition_penalty: float = 1.2,
+        eos_penalty: float = 2.0,
+        resolution: int = 24,
+        time_steps: int = 2048,
+        seed: Optional[int] = None,
+        verbose: bool = False,
+    ) -> np.ndarray:
+        """
+        Generate music and convert to pianoroll representation.
+
+        Args:
+            genre: Genre for conditioning
+            instrument: Instrument for conditioning
+            max_length: Maximum token sequence length
+            min_length: Minimum sequence length before allowing EOS
+            temperature: Sampling temperature
+            top_k: Top-k sampling parameter
+            top_p: Nucleus sampling parameter
+            repetition_penalty: Penalty for repeated tokens
+            eos_penalty: Penalty for EOS token before min_length
+            resolution: Ticks per beat (for time conversion)
+            time_steps: Length of output pianoroll
+            seed: Random seed
+            verbose: Print progress
+
+        Returns:
+            Pianoroll array (128, time_steps)
+        """
+        # Generate token sequence
+        tokens = self.generate(
+            genre=genre,
+            instrument=instrument,
+            max_length=max_length,
+            min_length=min_length,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            repetition_penalty=repetition_penalty,
+            eos_penalty=eos_penalty,
+            seed=seed,
+            verbose=verbose,
+        )
+
+        # Convert tokens to pianoroll
+        pianoroll = self._tokens_to_pianoroll(tokens, time_steps)
+
+        return pianoroll
+
+    def generate_midi(
+        self,
+        genre: str,
+        output_path: str,
+        instrument: str = "Acoustic Grand Piano",
+        max_length: Optional[int] = None,
+        min_length: int = 200,
+        temperature: float = 1.0,
+        top_k: int = 50,
+        top_p: float = 0.9,
+        repetition_penalty: float = 1.2,
+        eos_penalty: float = 2.0,
+        resolution: int = 24,
+        tempo: float = 120.0,
+        seed: Optional[int] = None,
+        verbose: bool = True,
+    ) -> muspy.Music:
+        """
+        Generate music and save to MIDI file.
+
+        Args:
+            genre: Genre for conditioning
+            output_path: Path to save MIDI file
+            instrument: Instrument for conditioning
+            max_length: Maximum token sequence length
+            min_length: Minimum sequence length before allowing EOS
+            temperature: Sampling temperature
+            top_k: Top-k sampling parameter
+            top_p: Nucleus sampling parameter
+            repetition_penalty: Penalty for repeated tokens
+            resolution: Ticks per beat
+            tempo: Tempo in BPM
+            seed: Random seed
+            verbose: Print progress
+
+        Returns:
+            Generated muspy.Music object
+        """
+        from ..core.vocabulary import INSTRUMENT_NAME_TO_ID
+
+        # Generate token sequence
+        tokens = self.generate(
+            genre=genre,
+            instrument=instrument,
+            max_length=max_length,
+            min_length=min_length,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            repetition_penalty=repetition_penalty,
+            eos_penalty=eos_penalty,
+            seed=seed,
+            verbose=verbose,
+        )
+
+        # Convert to Music object
+        music = self._tokens_to_music(
+            tokens=tokens,
+            instrument=instrument,
+            resolution=resolution,
+            tempo=tempo,
+        )
+
+        # Save to MIDI
+        output_path = Path(output_path)  # type: ignore
+        output_path.parent.mkdir(parents=True, exist_ok=True)  # type: ignore
+        music.write_midi(str(output_path))
+
+        if verbose:
+            print(f"Saved MIDI to: {output_path}")
+
+        return music
+
+    def generate_song(
+        self,
+        genre: str,
+        min_length: int = 200,
+        temperature: float = 1.0,
+        top_k: int = 50,
+        top_p: float = 0.9,
+        eos_penalty: float = 2.0,
+        verbose: bool = True,
+    ) -> Dict[str, np.ndarray]:
+        """
+        Generate a complete song with multiple instruments.
+
+        Args:
+            genre: Genre for conditioning
+            min_length: Minimum sequence length before allowing EOS
+            temperature: Sampling temperature
+            top_k: Top-k sampling parameter
+            top_p: Nucleus sampling parameter
+            eos_penalty: Penalty for EOS token before min_length
+            verbose: Print progress
+
+        Returns:
+            Dict mapping instrument names to token sequences
+        """
+        tracks: Dict[str, np.ndarray] = {}
+
+        # Generate drums first
+        if verbose:
+            print(f"Generating drum track for '{genre}'...")
+        tracks["Drums"] = self.generate(
+            genre=genre,
+            instrument="Drums",
+            min_length=min_length,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            eos_penalty=eos_penalty,
+            verbose=verbose,
+        )
+
+        # Get top instruments for this genre by frequency (same as LSTM generator)
+        genre_instrument_ids = self.vocabulary.get_top_instruments_for_genre(
+            genre, top_n=3, exclude_drums=True
+        )
+        if not genre_instrument_ids:
+            # Fallback to common rock/pop instruments
+            genre_instrument_ids = [25, 33, 0]  # Guitar, Bass, Piano
+
+        for inst_id in genre_instrument_ids:
+            instrument = GENERAL_MIDI_INSTRUMENTS.get(inst_id, "Acoustic Grand Piano")
+            if verbose:
+                print(f"\nGenerating {instrument}...")
+            tracks[instrument] = self.generate(
+                genre=genre,
+                instrument=instrument,
+                min_length=min_length,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                eos_penalty=eos_penalty,
+                verbose=verbose,
+            )
+
+        return tracks
+
+    def generate_song_midi(
+        self,
+        genre: str,
+        output_path: str,
+        min_length: int = 200,
+        temperature: float = 1.0,
+        top_k: int = 50,
+        top_p: float = 0.9,
+        eos_penalty: float = 2.0,
+        resolution: int = 24,
+        tempo: float = 120.0,
+        verbose: bool = True,
+    ) -> muspy.Music:
+        """
+        Generate a complete song and save to MIDI file.
+
+        Args:
+            genre: Genre for conditioning
+            output_path: Path to save MIDI file
+            min_length: Minimum sequence length before allowing EOS
+            temperature: Sampling temperature
+            top_k: Top-k sampling parameter
+            top_p: Nucleus sampling parameter
+            eos_penalty: Penalty for EOS token before min_length
+            resolution: Ticks per beat
+            tempo: Tempo in BPM
+            verbose: Print progress
+
+        Returns:
+            Generated muspy.Music object
+        """
+        # Generate all instrument tracks
+        tracks = self.generate_song(
+            genre=genre,
+            min_length=min_length,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            eos_penalty=eos_penalty,
+            verbose=verbose,
+        )
+
+        # Create Music object
+        music = muspy.Music(
+            resolution=resolution,
+            tempos=[muspy.Tempo(time=0, qpm=tempo)],
+        )
+
+        # Convert each track
+        for instrument, tokens in tracks.items():
+            track_music = self._tokens_to_music(
+                tokens=tokens,
+                instrument=instrument,
+                resolution=resolution,
+                tempo=tempo,
+            )
+            for track in track_music.tracks:
+                music.tracks.append(track)
+
+        # Save to MIDI
+        output_path = Path(output_path)  # type: ignore
+        output_path.parent.mkdir(parents=True, exist_ok=True)  # type: ignore
+        music.write_midi(str(output_path))
+
+        if verbose:
+            print(f"\nSaved song to: {output_path}")
+
+        return music
+
+    def _softmax(self, x: np.ndarray) -> np.ndarray:
+        """Apply softmax to logits."""
+        exp_x = np.exp(x - np.max(x))  # Subtract max for numerical stability
+        return exp_x / exp_x.sum()
+
+    def _top_k_filter(self, probs: np.ndarray, k: int) -> np.ndarray:
+        """Keep only top-k probability tokens."""
+        if k <= 0 or k >= len(probs):
+            return probs
+
+        # Find k-th largest value
+        threshold = np.partition(probs, -k)[-k]
+
+        # Zero out everything below threshold
+        filtered = probs.copy()
+        filtered[probs < threshold] = 0
+
+        return filtered
+
+    def _top_p_filter(self, probs: np.ndarray, p: float) -> np.ndarray:
+        """Apply nucleus (top-p) sampling."""
+        if p <= 0 or p >= 1:
+            return probs
+
+        # Sort probabilities in descending order
+        sorted_indices = np.argsort(probs)[::-1]
+        sorted_probs = probs[sorted_indices]
+
+        # Find cutoff where cumulative probability exceeds p
+        cumsum = np.cumsum(sorted_probs)
+        cutoff_idx = np.searchsorted(cumsum, p)
+
+        # Zero out tokens beyond cutoff
+        filtered = probs.copy()
+        cutoff_indices = sorted_indices[cutoff_idx + 1:]
+        filtered[cutoff_indices] = 0
+
+        return filtered
+
+    def _tokens_to_pianoroll(
+        self,
+        tokens: np.ndarray,
+        time_steps: int = 2048,
+    ) -> np.ndarray:
+        """
+        Convert token sequence to pianoroll representation.
+
+        Args:
+            tokens: Array of token IDs
+            time_steps: Length of output pianoroll
+
+        Returns:
+            Pianoroll array (128, time_steps)
+        """
+        pianoroll = np.zeros((128, time_steps), dtype=np.float32)
+        current_time = 0
+        active_notes: Dict[int, int] = {}  # pitch -> start_time
+
+        for token in tokens:
+            event_type, value = self.event_vocab.decode_token(int(token))
+
+            if event_type == 'note_on':
+                pitch = value
+                if pitch < 128 and current_time < time_steps:
+                    active_notes[pitch] = current_time
+
+            elif event_type == 'note_off':
+                pitch = value
+                if pitch in active_notes:
+                    start = active_notes.pop(pitch)
+                    end = min(current_time, time_steps)
+                    if start < end:
+                        pianoroll[pitch, start:end] = 1.0
+
+            elif event_type == 'time_shift':
+                current_time += value
+                if current_time >= time_steps:
+                    break
+
+            elif event_type == 'eos':
+                break
+
+        # Close any remaining active notes
+        for pitch, start in active_notes.items():
+            end = min(current_time, time_steps)
+            if start < end and pitch < 128:
+                pianoroll[pitch, start:end] = 1.0
+
+        return pianoroll
+
+    def _tokens_to_music(
+        self,
+        tokens: np.ndarray,
+        instrument: str = "Acoustic Grand Piano",
+        resolution: int = 24,
+        tempo: float = 120.0,
+    ) -> muspy.Music:
+        """
+        Convert token sequence to muspy Music object.
+
+        Args:
+            tokens: Array of token IDs
+            instrument: Instrument name
+            resolution: Ticks per beat
+            tempo: Tempo in BPM
+
+        Returns:
+            muspy.Music object
+        """
+        from ..core.vocabulary import INSTRUMENT_NAME_TO_ID
+
+        notes = []
+        current_time = 0
+        active_notes: Dict[int, Tuple[int, int]] = {}  # pitch -> (start_time, velocity)
+
+        for token in tokens:
+            event_type, value = self.event_vocab.decode_token(int(token))
+
+            if event_type == 'note_on':
+                pitch = value
+                if pitch < 128:
+                    active_notes[pitch] = (current_time, 80)  # Default velocity
+
+            elif event_type == 'note_off':
+                pitch = value
+                if pitch in active_notes:
+                    start, velocity = active_notes.pop(pitch)
+                    duration = current_time - start
+                    if duration > 0:
+                        notes.append(muspy.Note(
+                            time=start,
+                            pitch=pitch,
+                            duration=duration,
+                            velocity=velocity,
+                        ))
+
+            elif event_type == 'time_shift':
+                current_time += value
+
+            elif event_type == 'velocity':
+                # Update velocity for next notes
+                pass  # Could store and use for next note-on
+
+            elif event_type == 'eos':
+                break
+
+        # Close any remaining active notes
+        for pitch, (start, velocity) in active_notes.items():
+            duration = max(1, current_time - start)
+            notes.append(muspy.Note(
+                time=start,
+                pitch=pitch,
+                duration=duration,
+                velocity=velocity,
+            ))
+
+        # Create track
+        program = INSTRUMENT_NAME_TO_ID.get(instrument, 0)
+        is_drum = (instrument == "Drums" or program == 128)
+
+        track = muspy.Track(
+            program=0 if is_drum else program,
+            is_drum=is_drum,
+            name=instrument,
+            notes=sorted(notes, key=lambda n: n.time),
+        )
+
+        # Create Music object
+        music = muspy.Music(
+            resolution=resolution,
+            tempos=[muspy.Tempo(time=0, qpm=tempo)],
+            tracks=[track],
+        )
+
+        return music
+
+    def summary(self) -> str:
+        """Get summary of generator configuration."""
+        return self.bundle.summary()
+
+
+# ============================================================================
+# Factory Function for Creating Generators
+# ============================================================================
+
+def create_generator(
+    bundle_path: str
+) -> Union[MusicGenerator, TransformerMusicGenerator]:
+    """
+    Create appropriate generator based on model bundle type.
+
+    This is the recommended way to create a generator when you don't know
+    the model type ahead of time.
+
+    Args:
+        bundle_path: Path to the model bundle .h5 file
+
+    Returns:
+        MusicGenerator for LSTM models, TransformerMusicGenerator for Transformers
+
+    Example:
+        generator = create_generator("models/my_model.h5")
+        if isinstance(generator, TransformerMusicGenerator):
+            # Use autoregressive generation
+            generator.generate_midi(genre="rock", output_path="out.mid")
+        else:
+            # Use LSTM generation
+            generator.generate_song_midi(genre="rock", output_path="out.mid")
+    """
+    bundle = load_model_bundle(bundle_path)
+
+    if isinstance(bundle, TransformerModelBundle):
+        return TransformerMusicGenerator(bundle)
+    else:
+        return MusicGenerator(bundle)
 
 
 def generate_from_bundle(

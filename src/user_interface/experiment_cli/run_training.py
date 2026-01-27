@@ -3,6 +3,7 @@ Non-interactive entry point for model training.
 
 Designed for use in SLURM batch jobs and automated pipelines.
 Supports distributed training via TensorFlow distribution strategies.
+Supports both LSTM and Transformer models (auto-detected from config).
 
 Usage:
     python -m src.user_interface.experiment_cli.run_training \
@@ -12,6 +13,7 @@ Usage:
 """
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -23,7 +25,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description='Train a music generation model',
+        description='Train a music generation model (LSTM or Transformer)',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
@@ -87,36 +89,20 @@ def parse_args():
     return parser.parse_args()
 
 
-def main():
-    """Main entry point for training."""
-    args = parse_args()
+def detect_model_type(config_path: str) -> str:
+    """Detect model type from config file."""
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+    return config.get('model_type', 'lstm')
 
-    print("=" * 70)
-    print("FAMAM Model Training")
-    print("=" * 70)
-    print(f"Config: {args.config}")
-    print(f"Dataset: {args.dataset}")
-    print(f"Strategy: {args.strategy}")
-    print("=" * 70)
 
-    # Validate paths
-    config_path = Path(args.config)
-    dataset_path = Path(args.dataset)
-
-    if not config_path.exists():
-        print(f"Error: Config file not found: {config_path}")
-        sys.exit(1)
-
-    if not dataset_path.exists():
-        print(f"Error: Dataset file not found: {dataset_path}")
-        sys.exit(1)
-
-    # Import after path setup
+def train_lstm(args, config_path: Path, dataset_path: Path):
+    """Train LSTM model."""
     from src.core import MusicDataset
     from src.model_training import ModelTrainingConfig, train_from_music_dataset
 
     # Load configuration
-    print("\nLoading configuration...")
+    print("\nLoading LSTM configuration...")
     config = ModelTrainingConfig.load(str(config_path))
 
     # Override distribution settings from command line
@@ -154,15 +140,140 @@ def main():
 
     # Train
     print("\n" + "=" * 70)
-    print("Starting training...")
+    print("Starting LSTM training...")
     print("=" * 70 + "\n")
 
+    model, history, trainer = train_from_music_dataset(
+        datasets=datasets,
+        config=config,
+        vocabulary=dataset.vocabulary,
+    )
+
+    # Save model bundle
+    if args.save_bundle:
+        output_dir = Path(config.output_dir) / config.model_name
+        bundle_path = output_dir / "model_bundle"
+        print(f"\nSaving model bundle to: {bundle_path}.h5")
+        trainer.save_bundle(str(bundle_path), dataset.vocabulary)
+
+    return model, history
+
+
+def train_transformer(args, config_path: Path, dataset_path: Path):
+    """Train Transformer model."""
+    from src.core import MusicDataset
+    from src.core.event_vocabulary import EventVocabulary
+    from src.model_training.configs.transformer_config import TransformerTrainingConfig
+    from src.model_training.transformer_trainer import TransformerTrainer
+
+    # Load configuration
+    print("\nLoading Transformer configuration...")
+    config = TransformerTrainingConfig.load(str(config_path))
+
+    # Override distribution settings from command line
+    config.distribution_strategy = args.strategy
+    if args.batch_size_per_replica is not None:
+        config.batch_size_per_replica = args.batch_size_per_replica
+
+    if args.seed is not None:
+        config.random_seed = args.seed
+
+    print(config.summary())
+
+    # Load dataset
+    print("\nLoading dataset...")
+    dataset = MusicDataset.load(str(dataset_path))
+    print(f"  Entries: {len(dataset)}")
+    print(f"  Tracks: {dataset.count_tracks()}")
+    print(f"  Genres: {list(dataset.vocabulary.genre_to_id.keys())}")
+
+    # Create EventVocabulary for transformer
+    num_genres = len(dataset.vocabulary.genre_to_id)
+    event_vocab = EventVocabulary(num_genres=num_genres)
+
+    # Copy mappings from dataset vocabulary
+    event_vocab.genre_to_id = dataset.vocabulary.genre_to_id.copy()
+    event_vocab.id_to_genre = {v: k for k, v in event_vocab.genre_to_id.items()}
+    event_vocab.instrument_to_songs = dataset.vocabulary.instrument_to_songs.copy()
+    event_vocab.genre_to_instruments = dataset.vocabulary.genre_to_instruments.copy()
+
+    print(f"  Event vocabulary size: {event_vocab.vocab_size}")
+
+    # Parse splits
+    splits = tuple(float(x.strip()) for x in args.splits.split(','))
+    if len(splits) != 3 or abs(sum(splits) - 1.0) > 0.001:
+        print(f"Error: Invalid splits '{args.splits}'. Must be 3 values summing to 1.0")
+        sys.exit(1)
+
+    # Convert to event-based TensorFlow datasets for Transformer
+    print(f"\nConverting to event sequences and splitting: {splits}")
+    datasets = dataset.to_event_tensorflow_dataset(
+        event_vocab=event_vocab,
+        max_seq_length=config.max_seq_length,
+        splits=splits,
+        random_state=args.seed,
+        encode_velocity=config.encode_velocity,
+    )
+
+    # Create trainer and train
+    print("\n" + "=" * 70)
+    print("Starting Transformer training...")
+    print("=" * 70 + "\n")
+
+    trainer = TransformerTrainer(config, event_vocab)
+    model, history = trainer.train(
+        datasets['train'],
+        datasets['validation'],
+    )
+
+    # Evaluate on test set
+    if 'test' in datasets:
+        print("\nEvaluating on test set...")
+        trainer.evaluate(datasets['test'])
+
+    # Save model bundle
+    if args.save_bundle:
+        output_dir = Path(config.output_dir) / config.model_name
+        bundle_path = output_dir / "model_bundle.h5"
+        print(f"\nSaving transformer bundle to: {bundle_path}")
+        trainer.save_bundle(str(bundle_path), dataset.vocabulary)
+
+    return model, history
+
+
+def main():
+    """Main entry point for training."""
+    args = parse_args()
+
+    print("=" * 70)
+    print("FAMAM Model Training")
+    print("=" * 70)
+    print(f"Config: {args.config}")
+    print(f"Dataset: {args.dataset}")
+    print(f"Strategy: {args.strategy}")
+
+    # Validate paths
+    config_path = Path(args.config)
+    dataset_path = Path(args.dataset)
+
+    if not config_path.exists():
+        print(f"Error: Config file not found: {config_path}")
+        sys.exit(1)
+
+    if not dataset_path.exists():
+        print(f"Error: Dataset file not found: {dataset_path}")
+        sys.exit(1)
+
+    # Detect model type
+    model_type = detect_model_type(str(config_path))
+    print(f"Model Type: {model_type.upper()}")
+    print("=" * 70)
+
     try:
-        model, history, trainer = train_from_music_dataset(
-            datasets=datasets,
-            config=config,
-            vocabulary=dataset.vocabulary,
-        )
+        if model_type == 'transformer':
+            model, history = train_transformer(args, config_path, dataset_path)
+        else:
+            model, history = train_lstm(args, config_path, dataset_path)
 
         print("\n" + "=" * 70)
         print("Training complete!")
@@ -174,13 +285,6 @@ def main():
             final_val_loss = history.get('val_loss', [])[-1] if history.get('val_loss') else 'N/A'
             print(f"Final loss: {final_loss}")
             print(f"Final val_loss: {final_val_loss}")
-
-        # Save model bundle
-        if args.save_bundle:
-            output_dir = Path(config.output_dir) / config.model_name
-            bundle_path = output_dir / "model_bundle"
-            print(f"\nSaving model bundle to: {bundle_path}.h5")
-            trainer.save_bundle(str(bundle_path), dataset.vocabulary)
 
         print("\nTraining completed successfully!")
 
