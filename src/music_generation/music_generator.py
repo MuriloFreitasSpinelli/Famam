@@ -1226,7 +1226,7 @@ class TransformerMusicGenerator:
     def get_top_instruments_for_genre(
         self,
         genre: str,
-        top_n: int = 3,
+        top_n: int = 2,
         exclude_drums: bool = True
     ) -> List[str]:
         """Get top N most frequently used instruments for a genre."""
@@ -1283,6 +1283,11 @@ class TransformerMusicGenerator:
             print(f"Generating {instrument} in {genre} style...")
             print(f"  Max length: {max_length}, Min length: {min_length}, Temperature: {temperature}")
 
+        # Track consecutive time shifts and note counts for density control
+        consecutive_time_shifts = 0
+        note_count = 0
+        time_shift_penalty = 2.0  # Penalize time shifts after too many consecutive ones
+
         # Generate tokens one at a time
         for step in range(len(start_tokens), max_length):
             # Prepare input (batch of 1)
@@ -1303,6 +1308,14 @@ class TransformerMusicGenerator:
             # This is critical for models trained on short sequences
             if len(generated) < min_length and eos_penalty > 1.0:
                 next_token_logits[self.event_vocab.EOS_TOKEN] /= eos_penalty
+
+            # Penalize consecutive time shifts to encourage more notes
+            # This helps models that tend to generate sparse sequences
+            if consecutive_time_shifts >= 3:
+                # Penalize all time-shift tokens (256-355)
+                time_shift_start = self.event_vocab.TIME_SHIFT_OFFSET
+                time_shift_end = time_shift_start + self.event_vocab.MAX_TIME_SHIFT
+                next_token_logits[time_shift_start:time_shift_end] /= time_shift_penalty
 
             # Apply temperature
             if temperature != 1.0:
@@ -1326,24 +1339,35 @@ class TransformerMusicGenerator:
             next_token = np.random.choice(len(probs), p=probs)
             generated.append(int(next_token))
 
-            # Check for EOS - only stop if we've reached min_length
+            # Track token types for density control
+            event_type, _ = self.event_vocab.decode_token(int(next_token))
+            if event_type == 'time_shift':
+                consecutive_time_shifts += 1
+            else:
+                consecutive_time_shifts = 0
+                if event_type == 'note_on':
+                    note_count += 1
+
+            # Check for EOS - only stop if we've reached min_length AND have enough notes
+            min_notes = min_length // 10  # Require at least 1 note per 10 tokens
             if next_token == self.event_vocab.EOS_TOKEN:
-                if len(generated) >= min_length:
+                if len(generated) >= min_length and note_count >= min_notes:
                     if verbose:
-                        print(f"  EOS reached at step {step}")
+                        print(f"  EOS reached at step {step} with {note_count} notes")
                     break
                 else:
                     # Remove the EOS and continue generating
                     generated.pop()
                     if verbose and step % 50 == 0:
-                        print(f"  Ignoring early EOS at step {step}, continuing...")
+                        reason = "not enough notes" if note_count < min_notes else "too short"
+                        print(f"  Ignoring early EOS at step {step} ({reason}), continuing...")
 
             # Progress indicator
             if verbose and step % 100 == 0:
-                print(f"  Generated {step}/{max_length} tokens...")
+                print(f"  Generated {step}/{max_length} tokens, {note_count} notes...")
 
         if verbose:
-            print(f"  Generated {len(generated)} tokens total")
+            print(f"  Generated {len(generated)} tokens total, {note_count} notes")
 
         return np.array(generated, dtype=np.int32)
 
@@ -1772,6 +1796,10 @@ class TransformerMusicGenerator:
         program = INSTRUMENT_NAME_TO_ID.get(instrument, 0)
         is_drum = (instrument == "Drums" or program == 128)
 
+        # For drums, loop the pattern to create repetition (essential for rock/pop)
+        if is_drum and notes:
+            notes = self._loop_drum_pattern(notes, resolution, num_loops=4)
+
         track = muspy.Track(
             program=0 if is_drum else program,
             is_drum=is_drum,
@@ -1787,6 +1815,53 @@ class TransformerMusicGenerator:
         )
 
         return music
+
+    def _loop_drum_pattern(
+        self,
+        notes: List[muspy.Note],
+        resolution: int,
+        num_loops: int = 4,
+        bar_length_beats: int = 4,
+    ) -> List[muspy.Note]:
+        """
+        Loop a drum pattern to create repetitive structure.
+
+        Takes the generated drum notes and repeats them to fill the song,
+        creating the repetitive patterns essential for rock/pop music.
+
+        Args:
+            notes: Original drum notes
+            resolution: Ticks per beat
+            num_loops: Number of times to repeat the pattern
+            bar_length_beats: Beats per bar (usually 4)
+
+        Returns:
+            List of notes with pattern repeated
+        """
+        if not notes:
+            return notes
+
+        # Find the pattern length (quantize to nearest bar)
+        bar_ticks = resolution * bar_length_beats
+        max_time = max(n.time + n.duration for n in notes)
+
+        # Round up to nearest bar
+        pattern_bars = max(1, (max_time + bar_ticks - 1) // bar_ticks)
+        pattern_length = pattern_bars * bar_ticks
+
+        # Create looped notes
+        looped_notes = []
+        for loop in range(num_loops):
+            offset = loop * pattern_length
+            for note in notes:
+                looped_notes.append(muspy.Note(
+                    time=note.time + offset,
+                    pitch=note.pitch,
+                    duration=note.duration,
+                    velocity=note.velocity,
+                ))
+
+        return looped_notes
 
     def summary(self) -> str:
         """Get summary of generator configuration."""

@@ -1,0 +1,4 @@
+sometimes generating songs that are super long.
+drums pattern needs to be corrected.
+maybe layer the generation multiple times, so it generates on the same data a few times.
+drums follow rules, so do song 4 by 4. then can switch to different drums, with a different drum play on the switch, can use this to better the others.

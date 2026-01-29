@@ -44,6 +44,12 @@ class TransformerTrainingConfig:
     # Position embedding
     use_learned_positional_embedding: bool = True  # vs sinusoidal
 
+    # ============ Relative Attention (Music Transformer) ============
+    # Use relative positional attention instead of absolute (highly recommended for music)
+    use_relative_attention: bool = True
+    # Maximum relative distance to consider (usually seq_length // 2)
+    max_relative_position: int = 512
+
     # ============ Training Hyperparameters ============
     batch_size: int = 16
     epochs: int = 100
@@ -183,6 +189,10 @@ class TransformerTrainingConfig:
             f"  Head Dimension: {self.head_dim}",
             f"  Feed-Forward Dimension: {self.d_ff}",
             f"  Dropout: {self.dropout_rate}",
+            "",
+            "Attention:",
+            f"  Relative Attention: {self.use_relative_attention} (Music Transformer)",
+            f"  Max Relative Position: {self.max_relative_position}",
             "",
             "Training:",
             f"  Optimizer: {self.optimizer}",

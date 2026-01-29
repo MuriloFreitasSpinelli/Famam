@@ -1,0 +1,10 @@
+test all modules
+train and generate
+write readmes, add author tags, do readmes go into the __init__? search that up
+train in cluster, make single slurm script for this
+make gui
+Document specifics in plantuml like architecture class diagram 
+Document process in text
+Document fake steps and issues.
+Clean up all this shit once again.
+Run some tests and draw graphs. Try different encodings and models for tests. 

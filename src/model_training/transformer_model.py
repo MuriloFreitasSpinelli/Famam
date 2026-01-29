@@ -1,10 +1,17 @@
 """
-GPT-style causal Transformer decoder for autoregressive music generation.
+Music Transformer with Relative Positional Attention for music generation.
+
+Based on "Music Transformer: Generating Music with Long-Term Structure"
+(Huang et al., 2018) - https://arxiv.org/abs/1809.04281
+
+Key innovation: Relative positional attention allows the model to learn
+distance-based patterns (e.g., "repeat every 4 beats") rather than
+absolute positions, which is crucial for music generation.
 
 Architecture:
-- Token embedding + learned positional embedding
-- N transformer blocks (self-attention + FFN with pre-norm)
-- Causal mask (can only attend to previous positions)
+- Token embedding (no absolute positional embedding)
+- N transformer blocks with RELATIVE self-attention + FFN
+- Causal mask for autoregressive generation
 - Output: logits over vocab_size
 """
 
@@ -21,25 +28,262 @@ def get_causal_attention_mask(seq_length: int) -> tf.Tensor:
     """
     Create a causal attention mask for autoregressive decoding.
 
-    The mask prevents attending to future positions.
-
     Args:
         seq_length: Sequence length
 
     Returns:
         Boolean mask of shape (seq_length, seq_length) where True = masked
     """
-    # Create lower triangular matrix (1s in lower triangle, 0s in upper)
     mask = 1 - tf.linalg.band_part(tf.ones((seq_length, seq_length)), -1, 0)
     return tf.cast(mask, tf.bool)
 
 
-class TransformerBlock(layers.Layer):
+class RelativePositionalEmbedding(layers.Layer):
     """
-    Single Transformer block with pre-norm architecture.
+    Learnable relative positional embeddings.
 
-    Components:
-    - LayerNorm -> Multi-Head Self-Attention -> Residual
+    Creates embeddings for relative distances from -max_relative_position to
+    +max_relative_position. For music, this allows learning patterns like
+    "notes 4 beats apart" regardless of absolute position.
+    """
+
+    def __init__(
+        self,
+        max_relative_position: int,
+        embedding_dim: int,
+        **kwargs
+    ):
+        super().__init__(**kwargs)
+        self.max_relative_position = max_relative_position
+        self.embedding_dim = embedding_dim
+
+        # Embeddings for relative positions: [-max_rel, ..., -1, 0, 1, ..., max_rel]
+        # Total: 2 * max_relative_position + 1 embeddings
+        self.num_embeddings = 2 * max_relative_position + 1
+
+        self.embeddings = self.add_weight(
+            name='relative_embeddings',
+            shape=(self.num_embeddings, embedding_dim),
+            initializer='glorot_uniform',
+            trainable=True,
+        )
+
+    def call(self, length: int) -> tf.Tensor:
+        """
+        Get relative position embeddings for a sequence of given length.
+
+        Args:
+            length: Sequence length
+
+        Returns:
+            Tensor of shape (length, length, embedding_dim) where [i, j] gives
+            the embedding for the relative position (j - i), clipped to max range.
+        """
+        # Create relative position indices
+        # range_vec: [0, 1, 2, ..., length-1]
+        range_vec = tf.range(length)
+
+        # distance_mat[i, j] = j - i (relative distance from position i to j)
+        distance_mat = range_vec[None, :] - range_vec[:, None]
+
+        # Clip to max relative position range and shift to positive indices
+        distance_mat_clipped = tf.clip_by_value(
+            distance_mat,
+            -self.max_relative_position,
+            self.max_relative_position
+        )
+        # Shift: -max_rel -> 0, 0 -> max_rel, +max_rel -> 2*max_rel
+        final_mat = distance_mat_clipped + self.max_relative_position
+
+        # Gather embeddings
+        return tf.gather(self.embeddings, final_mat)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            'max_relative_position': self.max_relative_position,
+            'embedding_dim': self.embedding_dim,
+        })
+        return config
+
+
+class RelativeMultiHeadAttention(layers.Layer):
+    """
+    Multi-Head Attention with Relative Positional Encoding.
+
+    Implements the efficient "skewing" algorithm from Music Transformer
+    to compute relative attention in O(LD) memory instead of O(L²D).
+
+    Attention score: (Q @ K^T + Q @ E^T_rel) / sqrt(d_k)
+    where E_rel contains relative position embeddings.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        max_relative_position: int = 512,
+        dropout_rate: float = 0.1,
+        **kwargs
+    ):
+        super().__init__(**kwargs)
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.max_relative_position = max_relative_position
+        self.dropout_rate = dropout_rate
+
+        assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
+        self.head_dim = d_model // num_heads
+
+        # Linear projections for Q, K, V
+        self.wq = layers.Dense(d_model, name='query')
+        self.wk = layers.Dense(d_model, name='key')
+        self.wv = layers.Dense(d_model, name='value')
+
+        # Output projection
+        self.wo = layers.Dense(d_model, name='output')
+
+        # Relative position embeddings (one per head)
+        self.relative_pos_emb = RelativePositionalEmbedding(
+            max_relative_position=max_relative_position,
+            embedding_dim=self.head_dim,
+            name='relative_position_embedding',
+        )
+
+        self.dropout = layers.Dropout(dropout_rate)
+        self.scale = tf.math.sqrt(tf.cast(self.head_dim, tf.float32))
+
+    def _split_heads(self, x: tf.Tensor, batch_size: int) -> tf.Tensor:
+        """Split the last dimension into (num_heads, head_dim)."""
+        x = tf.reshape(x, (batch_size, -1, self.num_heads, self.head_dim))
+        return tf.transpose(x, perm=[0, 2, 1, 3])  # (batch, heads, seq_len, head_dim)
+
+    def _merge_heads(self, x: tf.Tensor, batch_size: int) -> tf.Tensor:
+        """Merge heads back into d_model dimension."""
+        x = tf.transpose(x, perm=[0, 2, 1, 3])  # (batch, seq_len, heads, head_dim)
+        return tf.reshape(x, (batch_size, -1, self.d_model))
+
+    def _compute_relative_attention(
+        self,
+        q: tf.Tensor,
+        k: tf.Tensor,
+        v: tf.Tensor,
+        mask: Optional[tf.Tensor],
+        training: bool,
+    ) -> tf.Tensor:
+        """
+        Compute attention with relative position bias.
+
+        Args:
+            q: Query tensor (batch, heads, seq_len, head_dim)
+            k: Key tensor (batch, heads, seq_len, head_dim)
+            v: Value tensor (batch, heads, seq_len, head_dim)
+            mask: Attention mask (optional)
+            training: Whether in training mode
+
+        Returns:
+            Attention output (batch, heads, seq_len, head_dim)
+        """
+        seq_len = tf.shape(q)[2]
+
+        # Standard attention scores: Q @ K^T
+        # Shape: (batch, heads, seq_len, seq_len)
+        content_scores = tf.matmul(q, k, transpose_b=True)
+
+        # Relative position scores: Q @ E_rel^T
+        # Get relative position embeddings: (seq_len, seq_len, head_dim)
+        rel_pos_emb = self.relative_pos_emb(seq_len)
+
+        # Compute Q @ E_rel^T using einsum for efficiency
+        # q: (batch, heads, seq_len, head_dim)
+        # rel_pos_emb: (seq_len, seq_len, head_dim)
+        # Result: (batch, heads, seq_len, seq_len)
+        position_scores = tf.einsum('bhid,ijd->bhij', q, rel_pos_emb)
+
+        # Combined attention scores
+        attention_scores = (content_scores + position_scores) / self.scale
+
+        # Apply mask (causal + optional padding)
+        if mask is not None:
+            # mask: True where we should NOT attend
+            attention_scores = tf.where(
+                mask,
+                tf.ones_like(attention_scores) * -1e9,
+                attention_scores
+            )
+
+        # Softmax to get attention weights
+        attention_weights = tf.nn.softmax(attention_scores, axis=-1)
+        attention_weights = self.dropout(attention_weights, training=training)
+
+        # Apply attention to values
+        output = tf.matmul(attention_weights, v)
+
+        return output
+
+    def call(
+        self,
+        query: tf.Tensor,
+        key: tf.Tensor,
+        value: tf.Tensor,
+        attention_mask: Optional[tf.Tensor] = None,
+        training: bool = False,
+    ) -> tf.Tensor:
+        """
+        Forward pass for relative multi-head attention.
+
+        Args:
+            query: Query tensor (batch, seq_len, d_model)
+            key: Key tensor (batch, seq_len, d_model)
+            value: Value tensor (batch, seq_len, d_model)
+            attention_mask: Boolean mask where True = mask out
+            training: Training mode flag
+
+        Returns:
+            Output tensor (batch, seq_len, d_model)
+        """
+        batch_size = tf.shape(query)[0]
+
+        # Project to Q, K, V
+        q = self.wq(query)
+        k = self.wk(key)
+        v = self.wv(value)
+
+        # Split heads
+        q = self._split_heads(q, batch_size)
+        k = self._split_heads(k, batch_size)
+        v = self._split_heads(v, batch_size)
+
+        # Compute relative attention
+        attention_output = self._compute_relative_attention(
+            q, k, v, attention_mask, training
+        )
+
+        # Merge heads
+        attention_output = self._merge_heads(attention_output, batch_size)
+
+        # Final projection
+        output = self.wo(attention_output)
+
+        return output
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            'd_model': self.d_model,
+            'num_heads': self.num_heads,
+            'max_relative_position': self.max_relative_position,
+            'dropout_rate': self.dropout_rate,
+        })
+        return config
+
+
+class RelativeTransformerBlock(layers.Layer):
+    """
+    Transformer block with Relative Multi-Head Attention.
+
+    Uses pre-norm architecture:
+    - LayerNorm -> Relative Multi-Head Self-Attention -> Residual
     - LayerNorm -> Feed-Forward Network -> Residual
     """
 
@@ -48,6 +292,7 @@ class TransformerBlock(layers.Layer):
         d_model: int,
         num_heads: int,
         d_ff: int,
+        max_relative_position: int = 512,
         dropout_rate: float = 0.1,
         **kwargs
     ):
@@ -55,17 +300,19 @@ class TransformerBlock(layers.Layer):
         self.d_model = d_model
         self.num_heads = num_heads
         self.d_ff = d_ff
+        self.max_relative_position = max_relative_position
         self.dropout_rate = dropout_rate
 
         # Pre-norm layers
         self.norm1 = layers.LayerNormalization(epsilon=1e-6)
         self.norm2 = layers.LayerNormalization(epsilon=1e-6)
 
-        # Multi-head attention
-        self.mha = layers.MultiHeadAttention(
+        # Relative multi-head attention
+        self.mha = RelativeMultiHeadAttention(
+            d_model=d_model,
             num_heads=num_heads,
-            key_dim=d_model // num_heads,
-            dropout=dropout_rate,
+            max_relative_position=max_relative_position,
+            dropout_rate=dropout_rate,
         )
 
         # Feed-forward network
@@ -77,23 +324,13 @@ class TransformerBlock(layers.Layer):
         ])
 
     def call(self, x, attention_mask=None, training=False):
-        """
-        Forward pass through transformer block.
-
-        Args:
-            x: Input tensor of shape (batch, seq_len, d_model)
-            attention_mask: Optional attention mask
-            training: Whether in training mode
-
-        Returns:
-            Output tensor of shape (batch, seq_len, d_model)
-        """
+        """Forward pass through relative transformer block."""
         # Self-attention with pre-norm
         x_norm = self.norm1(x)
         attn_output = self.mha(
             query=x_norm,
-            value=x_norm,
             key=x_norm,
+            value=x_norm,
             attention_mask=attention_mask,
             training=training,
         )
@@ -112,17 +349,124 @@ class TransformerBlock(layers.Layer):
             'd_model': self.d_model,
             'num_heads': self.num_heads,
             'd_ff': self.d_ff,
+            'max_relative_position': self.max_relative_position,
             'dropout_rate': self.dropout_rate,
         })
         return config
 
 
-class TokenAndPositionEmbedding(layers.Layer):
+# Keep original TransformerBlock for backwards compatibility
+class TransformerBlock(layers.Layer):
     """
-    Combined token and position embedding layer.
+    Original Transformer block with absolute positional attention.
+    Kept for backwards compatibility.
+    """
 
-    Adds learned positional embeddings to token embeddings.
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        d_ff: int,
+        dropout_rate: float = 0.1,
+        **kwargs
+    ):
+        super().__init__(**kwargs)
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_ff = d_ff
+        self.dropout_rate = dropout_rate
+
+        self.norm1 = layers.LayerNormalization(epsilon=1e-6)
+        self.norm2 = layers.LayerNormalization(epsilon=1e-6)
+
+        self.mha = layers.MultiHeadAttention(
+            num_heads=num_heads,
+            key_dim=d_model // num_heads,
+            dropout=dropout_rate,
+        )
+
+        self.ffn = keras.Sequential([
+            layers.Dense(d_ff, activation='gelu'),
+            layers.Dropout(dropout_rate),
+            layers.Dense(d_model),
+            layers.Dropout(dropout_rate),
+        ])
+
+    def call(self, x, attention_mask=None, training=False):
+        x_norm = self.norm1(x)
+        attn_output = self.mha(
+            query=x_norm,
+            value=x_norm,
+            key=x_norm,
+            attention_mask=attention_mask,
+            training=training,
+        )
+        x = x + attn_output
+
+        x_norm = self.norm2(x)
+        ffn_output = self.ffn(x_norm, training=training)
+        x = x + ffn_output
+
+        return x
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            'd_model': self.d_model,
+            'num_heads': self.num_heads,
+            'd_ff': self.d_ff,
+            'dropout_rate': self.dropout_rate,
+        })
+        return config
+
+
+class TokenEmbedding(layers.Layer):
     """
+    Token embedding layer WITHOUT positional embedding.
+
+    For Music Transformer, we use relative positional attention instead
+    of absolute positional embeddings, so we only need token embeddings.
+    """
+
+    def __init__(
+        self,
+        vocab_size: int,
+        d_model: int,
+        dropout_rate: float = 0.1,
+        **kwargs
+    ):
+        super().__init__(**kwargs)
+        self.vocab_size = vocab_size
+        self.d_model = d_model
+        self.dropout_rate = dropout_rate
+
+        self.token_emb = layers.Embedding(
+            input_dim=vocab_size,
+            output_dim=d_model,
+            name='token_embedding',
+        )
+        self.dropout = layers.Dropout(dropout_rate)
+
+    def call(self, x, training=False):
+        """Embed tokens (no position information - handled by relative attention)."""
+        embeddings = self.token_emb(x)
+        # Scale by sqrt(d_model) as in original Transformer
+        embeddings = embeddings * tf.math.sqrt(tf.cast(self.d_model, tf.float32))
+        return self.dropout(embeddings, training=training)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            'vocab_size': self.vocab_size,
+            'd_model': self.d_model,
+            'dropout_rate': self.dropout_rate,
+        })
+        return config
+
+
+# Keep original for backwards compatibility
+class TokenAndPositionEmbedding(layers.Layer):
+    """Original embedding with absolute positions. Kept for compatibility."""
 
     def __init__(
         self,
@@ -151,23 +495,12 @@ class TokenAndPositionEmbedding(layers.Layer):
         self.dropout = layers.Dropout(dropout_rate)
 
     def call(self, x, training=False):
-        """
-        Embed tokens with position information.
-
-        Args:
-            x: Token IDs of shape (batch, seq_len)
-            training: Whether in training mode
-
-        Returns:
-            Embeddings of shape (batch, seq_len, d_model)
-        """
         seq_len = tf.shape(x)[1]
         positions = tf.range(start=0, limit=seq_len, delta=1)
 
         token_embeddings = self.token_emb(x)
         position_embeddings = self.pos_emb(positions)
 
-        # Scale token embeddings by sqrt(d_model) as in original Transformer
         embeddings = token_embeddings * tf.math.sqrt(tf.cast(self.d_model, tf.float32))
         embeddings = embeddings + position_embeddings
 
@@ -186,10 +519,10 @@ class TokenAndPositionEmbedding(layers.Layer):
 
 class MusicTransformer(keras.Model):
     """
-    GPT-style Transformer for autoregressive music generation.
+    Music Transformer with Relative Positional Attention.
 
-    Takes token IDs as input and outputs logits over vocabulary.
-    Uses causal masking to ensure autoregressive property.
+    Based on Huang et al., 2018 - uses relative attention to capture
+    musical patterns like repetition and rhythmic structure.
     """
 
     def __init__(
@@ -201,6 +534,8 @@ class MusicTransformer(keras.Model):
         num_heads: int = 8,
         d_ff: int = 2048,
         dropout_rate: float = 0.1,
+        use_relative_attention: bool = True,
+        max_relative_position: int = 512,
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -211,36 +546,60 @@ class MusicTransformer(keras.Model):
         self.num_heads = num_heads
         self.d_ff = d_ff
         self.dropout_rate = dropout_rate
+        self.use_relative_attention = use_relative_attention
+        self.max_relative_position = max_relative_position
 
-        # Embedding layer
-        self.embedding = TokenAndPositionEmbedding(
-            vocab_size=vocab_size,
-            max_seq_length=max_seq_length,
-            d_model=d_model,
-            dropout_rate=dropout_rate,
-        )
-
-        # Transformer blocks
-        self.transformer_blocks = [
-            TransformerBlock(
+        # Embedding layer (with or without absolute positions)
+        if use_relative_attention:
+            # Only token embedding - position handled by relative attention
+            self.embedding = TokenEmbedding(
+                vocab_size=vocab_size,
                 d_model=d_model,
-                num_heads=num_heads,
-                d_ff=d_ff,
                 dropout_rate=dropout_rate,
-                name=f'transformer_block_{i}',
             )
-            for i in range(num_layers)
-        ]
+        else:
+            # Token + absolute positional embedding
+            self.embedding = TokenAndPositionEmbedding(
+                vocab_size=vocab_size,
+                max_seq_length=max_seq_length,
+                d_model=d_model,
+                dropout_rate=dropout_rate,
+            )
+
+        # Transformer blocks (with or without relative attention)
+        if use_relative_attention:
+            self.transformer_blocks = [
+                RelativeTransformerBlock(
+                    d_model=d_model,
+                    num_heads=num_heads,
+                    d_ff=d_ff,
+                    max_relative_position=max_relative_position,
+                    dropout_rate=dropout_rate,
+                    name=f'relative_transformer_block_{i}',
+                )
+                for i in range(num_layers)
+            ]
+        else:
+            self.transformer_blocks = [
+                TransformerBlock(
+                    d_model=d_model,
+                    num_heads=num_heads,
+                    d_ff=d_ff,
+                    dropout_rate=dropout_rate,
+                    name=f'transformer_block_{i}',
+                )
+                for i in range(num_layers)
+            ]
 
         # Final layer norm
         self.final_norm = layers.LayerNormalization(epsilon=1e-6)
 
-        # Output projection (tied with embedding weights is optional)
+        # Output projection
         self.output_projection = layers.Dense(vocab_size, name='output_projection')
 
     def call(self, inputs, training=False, return_hidden_states=False):
         """
-        Forward pass through the transformer.
+        Forward pass through the Music Transformer.
 
         Args:
             inputs: Dict with 'input_ids' and optional 'attention_mask'
@@ -250,7 +609,6 @@ class MusicTransformer(keras.Model):
 
         Returns:
             Logits of shape (batch, seq_len, vocab_size)
-            Optionally also hidden states from each layer
         """
         # Handle dict or tensor input
         if isinstance(inputs, dict):
@@ -260,7 +618,6 @@ class MusicTransformer(keras.Model):
             input_ids = inputs
             padding_mask = None
 
-        # Get sequence length for causal mask
         seq_len = tf.shape(input_ids)[1]
 
         # Create causal attention mask
@@ -268,12 +625,8 @@ class MusicTransformer(keras.Model):
 
         # Combine with padding mask if provided
         if padding_mask is not None:
-            # padding_mask: (batch, seq_len), 1 = attend, 0 = mask
-            # Convert to (batch, 1, 1, seq_len) for broadcasting
             padding_mask = tf.cast(padding_mask[:, tf.newaxis, tf.newaxis, :], tf.bool)
-            # Invert: True = mask out
             padding_mask = ~padding_mask
-            # Combine: mask if causal mask OR padding mask
             causal_mask = causal_mask | padding_mask
 
         # Embed tokens
@@ -307,6 +660,8 @@ class MusicTransformer(keras.Model):
             'num_heads': self.num_heads,
             'd_ff': self.d_ff,
             'dropout_rate': self.dropout_rate,
+            'use_relative_attention': self.use_relative_attention,
+            'max_relative_position': self.max_relative_position,
         }
 
     @classmethod
@@ -322,9 +677,11 @@ def build_transformer_model(
     num_heads: int = 8,
     d_ff: int = 2048,
     dropout_rate: float = 0.1,
+    use_relative_attention: bool = True,
+    max_relative_position: int = 512,
 ) -> keras.Model:
     """
-    Build a GPT-style causal Transformer model.
+    Build a Music Transformer model.
 
     Args:
         vocab_size: Size of token vocabulary
@@ -334,9 +691,11 @@ def build_transformer_model(
         num_heads: Number of attention heads
         d_ff: Feed-forward hidden dimension
         dropout_rate: Dropout rate
+        use_relative_attention: If True, use relative positional attention (recommended)
+        max_relative_position: Maximum relative distance to consider
 
     Returns:
-        Compiled Keras Model (uncompiled, call .compile() after)
+        MusicTransformer model instance
     """
     return MusicTransformer(
         vocab_size=vocab_size,
@@ -346,6 +705,8 @@ def build_transformer_model(
         num_heads=num_heads,
         d_ff=d_ff,
         dropout_rate=dropout_rate,
+        use_relative_attention=use_relative_attention,
+        max_relative_position=max_relative_position,
     )
 
 
@@ -358,11 +719,15 @@ def build_transformer_from_config(
 
     Args:
         config: TransformerTrainingConfig instance
-        vocab_size: Size of token vocabulary (from EventVocabulary.vocab_size)
+        vocab_size: Size of token vocabulary
 
     Returns:
-        Keras Model instance
+        MusicTransformer model instance
     """
+    # Check if config has relative attention settings
+    use_relative = getattr(config, 'use_relative_attention', True)
+    max_rel_pos = getattr(config, 'max_relative_position', config.max_seq_length // 2)
+
     return build_transformer_model(
         vocab_size=vocab_size,
         max_seq_length=config.max_seq_length,
@@ -371,4 +736,6 @@ def build_transformer_from_config(
         num_heads=config.num_heads,
         d_ff=config.d_ff,
         dropout_rate=config.dropout_rate,
+        use_relative_attention=use_relative,
+        max_relative_position=max_rel_pos,
     )
