@@ -8,3 +8,4 @@ Document process in text
 Document fake steps and issues.
 Clean up all this shit once again.
 Run some tests and draw graphs. Try different encodings and models for tests. 
+Multithread preprocessing

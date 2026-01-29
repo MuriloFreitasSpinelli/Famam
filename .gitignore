@@ -1,5 +1,6 @@
 # Ignore complete dataset, its huge
 data/midi/
+data/datasets/
 logs/
 slurm_logs/
 models/
