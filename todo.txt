@@ -1,0 +1,27 @@
+test all modules
+train and generate
+add vocabulary to model bundle.
+
+make gui
+Document specifics in plantuml like architecture class diagram 
+Document process in text
+Document fake steps and issues.
+Clean up all this shit once again.
+Run some tests and draw graphs. Try different encodings and models for tests. 
+Multithread preprocessing
+Clean up Generator
+Separate Training Client from Generation UI and Generation Client
+
+Speak of the design philosiophy. pipeline, few object pass by and get transformed, configs at stages for reproducability. 
+And availablility in the middle of the pipeline. DIfficulty of inferring 4 by 4 and 16 by 16 etc... need long sequences. speak of musics flow, how it works.
+Challanges separated by phases, design, data processing, training, generating.
+
+Train on 4\4s 
+Enforcing 4 by 4
+Can contactinate and do continuations to last longer
+Pu tvocabulary together in model bundle. 
+
+Make LSTM Mono and Poly
+Make Transformer Mono and Poly
+
+Make Special branch for generation only with UI
