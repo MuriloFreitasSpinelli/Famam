@@ -806,10 +806,10 @@ class ExperimentCLI:
     def create_bundle(self):
         """Create model bundle from checkpoint."""
         from tensorflow import keras
-        from ..config import TrainingConfig
+        from ..config import MusicDatasetConfig, TrainingConfig
         from ..data import MusicDataset
         from ..models import ModelBundle
-        from ..data import MultiTrackEncoder
+        from ..data import EventEncoder, REMIEncoder, MultiTrackEncoder
         from ..models import (
             TransformerModel, TransformerBlock,
             RelativeMultiHeadAttention, RelativePositionalEmbedding,
@@ -818,16 +818,57 @@ class ExperimentCLI:
 
         print_header("Create Bundle from Checkpoint")
 
-        # Get paths
+        # List available checkpoints
+        checkpoint_dirs = [Path("./models"), Path("./checkpoints")]
+        print("\nSearching for checkpoints...")
+        found_checkpoints = []
+        for ckpt_dir in checkpoint_dirs:
+            if ckpt_dir.exists():
+                found_checkpoints.extend(ckpt_dir.rglob("*.keras"))
+
+        if found_checkpoints:
+            print("\nFound checkpoints:")
+            for i, ckpt in enumerate(found_checkpoints[:10], 1):
+                print(f"  [{i}] {ckpt}")
+            if len(found_checkpoints) > 10:
+                print(f"  ... and {len(found_checkpoints) - 10} more")
+            print()
+
         checkpoint_path = get_input("Checkpoint file (.keras)")
-        if not checkpoint_path or not Path(checkpoint_path).exists():
+        if not checkpoint_path:
+            return
+
+        # Handle numeric selection
+        if checkpoint_path.isdigit():
+            idx = int(checkpoint_path) - 1
+            if 0 <= idx < len(found_checkpoints):
+                checkpoint_path = str(found_checkpoints[idx])
+
+        if not Path(checkpoint_path).exists():
             print("\nCheckpoint not found")
             wait_for_enter()
             return
 
+        # List training configs
+        configs = list(TRAINING_CONFIG_DIR.glob("*.json"))
+        if configs:
+            print("\nAvailable training configs:")
+            for i, cfg in enumerate(configs, 1):
+                print(f"  [{i}] {cfg.name}")
+            print()
+
         config_path = get_input("Training config file (.json)")
-        if not config_path or not Path(config_path).exists():
-            # Try config dirs
+        if not config_path:
+            return
+
+        # Handle numeric selection
+        if config_path.isdigit():
+            idx = int(config_path) - 1
+            if 0 <= idx < len(configs):
+                config_path = str(configs[idx])
+
+        # Resolve config path
+        if not Path(config_path).exists():
             for cfg_dir in [TRAINING_CONFIG_DIR]:
                 candidate = cfg_dir / config_path
                 if candidate.exists():
@@ -839,12 +880,30 @@ class ExperimentCLI:
                     break
 
         if not Path(config_path).exists():
-            print("\nConfig not found")
+            print("\nTraining config not found")
             wait_for_enter()
             return
 
+        # List available datasets
+        datasets_found = list(Path(".").rglob("*.h5"))
+        datasets_found = [d for d in datasets_found if "model_bundle" not in d.name]
+        if datasets_found:
+            print("\nFound datasets:")
+            for i, ds in enumerate(datasets_found[:10], 1):
+                print(f"  [{i}] {ds}")
+            print()
+
         dataset_path = get_input("Dataset file (.h5) for vocabulary")
-        if not dataset_path or not Path(dataset_path).exists():
+        if not dataset_path:
+            return
+
+        # Handle numeric selection
+        if dataset_path.isdigit():
+            idx = int(dataset_path) - 1
+            if 0 <= idx < len(datasets_found):
+                dataset_path = str(datasets_found[idx])
+
+        if not Path(dataset_path).exists():
             print("\nDataset not found")
             wait_for_enter()
             return
@@ -853,24 +912,67 @@ class ExperimentCLI:
         output_path = get_input("Output bundle path", default_output)
 
         try:
-            # Load config
+            # Load training config
             print("\nLoading training config...")
             config = TrainingConfig.load(config_path)
+            print(f"  Model: {config.model_name} ({config.model_type})")
 
             # Load dataset for vocabulary
             print("Loading dataset for vocabulary...")
             dataset = MusicDataset.load(dataset_path)
             vocabulary = dataset.vocabulary
+            print(f"  Genres: {vocabulary.num_genres}")
+            print(f"  Instruments: {vocabulary.num_active_instruments}")
 
-            # Create encoder
-            print("Creating encoder...")
-            encoder = MultiTrackEncoder(
-                num_genres=vocabulary.num_genres,
-                resolution=dataset.resolution,
-            )
+            # Try to load dataset config for encoder settings
+            dataset_config_path = Path(dataset_path).with_suffix('.config.json')
+            encoder_type = "multitrack"  # default
+            resolution = dataset.resolution
+            positions_per_bar = 32
+            encode_velocity = True
+
+            if dataset_config_path.exists():
+                print(f"Loading dataset config: {dataset_config_path}")
+                dataset_config = MusicDatasetConfig.load(str(dataset_config_path))
+                encoder_type = dataset_config.encoder_type
+                resolution = dataset_config.resolution
+                positions_per_bar = dataset_config.positions_per_bar
+                encode_velocity = dataset_config.encode_velocity
+                print(f"  Encoder type: {encoder_type}")
+            else:
+                # Ask user for encoder type
+                encoder_type = get_choice_from_list(
+                    "Encoder type (no dataset config found):",
+                    ["multitrack", "event", "remi"],
+                    "multitrack"
+                )
+
+            # Create encoder based on type
+            print(f"Creating {encoder_type} encoder...")
+            if encoder_type == "event":
+                encoder = EventEncoder(
+                    num_genres=vocabulary.num_genres,
+                    resolution=resolution,
+                    encode_velocity=encode_velocity,
+                )
+            elif encoder_type == "remi":
+                encoder = REMIEncoder(
+                    num_genres=vocabulary.num_genres,
+                    resolution=resolution,
+                    positions_per_bar=positions_per_bar,
+                    encode_velocity=encode_velocity,
+                )
+            else:  # multitrack
+                encoder = MultiTrackEncoder(
+                    num_genres=vocabulary.num_genres,
+                    resolution=resolution,
+                    positions_per_bar=positions_per_bar,
+                    encode_velocity=encode_velocity,
+                )
+            print(f"  Vocab size: {encoder.vocab_size}")
 
             # Load model
-            print("Loading model...")
+            print("Loading model from checkpoint...")
             custom_objects = {
                 'TransformerModel': TransformerModel,
                 'TransformerBlock': TransformerBlock,

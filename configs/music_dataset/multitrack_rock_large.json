@@ -1,9 +1,9 @@
 {
-  "name": "multitrack_rock_cluster",
+  "name": "multitrack_rock_large",
   "input_dirs": [
     "./data/midi/clean_midi/"
   ],
-  "output_path": "data/datasets/multitrack_rock_cluster.h5",
+  "output_path": "data/datasets/multitrack_rock_large.h5",
   "genre_tsv_path": "./data/midi/clean_midi/genre.tsv",
   "allowed_genres": [
     "Alternative rock",
@@ -25,7 +25,8 @@
   "quantize": true,
   "quantize_grid": 1,
   "remove_empty_tracks": true,
-  "segment_length": 2048,
+  "segment_bars": 16,
+  "segment_length": null,
   "max_padding_ratio": 0.3,
   "enable_transposition": true,
   "transposition_semitones": [-5, -4, -3, -2, -1, 1, 2, 3, 4, 5, 6],
