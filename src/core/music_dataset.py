@@ -1,256 +1,164 @@
-from typing import List, Tuple, Optional, Dict, Any, TYPE_CHECKING, Union
-from dataclasses import dataclass, field
+"""
+MusicDataset for storing and converting music data to TensorFlow datasets.
+
+Author: Murilo de Freitas Spinelli
+"""
+
+from typing import List, Tuple, Optional, Dict, Union, Any, TYPE_CHECKING
+from dataclasses import dataclass
 from pathlib import Path
 import pickle
 import json
-import numpy as np # type: ignore
-import tensorflow as tf # type: ignore
-import h5py # type: ignore
-import muspy # type: ignore
+import re
 
-from .vocabulary import Vocabulary
-from .event_vocabulary import EventVocabulary
+import numpy as np
+import h5py
+
+from .vocabulary import Vocabulary, DRUM_PROGRAM_ID
+from ..data_preprocessing.encoders import BaseEncoder, EncodedSequence
 
 if TYPE_CHECKING:
-    from ..data_processing.configs import MusicDatasetConfig
-
-DRUM_PROGRAM_ID = 128
+    import muspy
+    import tensorflow as tf
 
 
 @dataclass
 class MusicEntry:
-    """A music object with its associated genre and cached drum pianoroll."""
-    music: muspy.Music
+    """
+    A music entry with associated metadata.
+
+    Attributes:
+        music: muspy.Music object containing one or more tracks
+        genre: Genre string
+        song_id: Unique identifier (e.g., "Artist/SongName" or "Artist/SongName_seg0")
+    """
+    music: Any  # muspy.Music
     genre: str
-    song_id: str = ""  # Unique identifier for the song (e.g., "Artist/SongName")
-    drum_pianoroll: Optional[np.ndarray] = None  # Cached drum track for alignment (128, max_time_steps)
+    song_id: str
 
 
 class MusicDataset:
     """
-    Dataset of Music objects that converts to per-track TensorFlow tensors.
+    Dataset of music tracks that converts to TensorFlow datasets via encoders.
 
-    Each track becomes a separate training sample with:
-        - pianoroll: (128, time_steps) - the track's notes
-        - instrument_id: int32 - MIDI program number (0-127) or 128 for drums
-        - genre_id: int32 - genre vocabulary ID
+    Each entry is a single track with metadata (genre_id, instrument_id).
+
+    Features:
+        - Pluggable encoder architecture
+        - Song-level train/val/test splits (prevents data leakage)
+        - HDF5 persistence
+        - Vocabulary management for genres/instruments
     """
 
     def __init__(
         self,
-        config: Optional["MusicDatasetConfig"] = None,
+        entries: Optional[List[MusicEntry]] = None,
+        vocabulary: Optional[Vocabulary] = None,
         resolution: int = 24,
-        max_time_steps: int = 512,
+        max_seq_length: int = 2048,
     ):
         """
-        Args:
-            config: Optional MusicDatasetConfig (overrides resolution/max_time_steps)
-            resolution: Ticks per beat (used if config not provided)
-            max_time_steps: Fixed time dimension (used if config not provided)
-        """
-        self.config = config
-        self.entries: List[MusicEntry] = []
-        self.vocabulary: Vocabulary = Vocabulary()
+        Initialize the dataset.
 
-        # Use config values if provided, otherwise use direct args
-        if config is not None:
-            self.resolution = config.resolution
-            self.max_time_steps = config.max_time_steps
-        else:
-            self.resolution = resolution
-            self.max_time_steps = max_time_steps
+        Args:
+            entries: List of MusicEntry objects (optional)
+            vocabulary: Vocabulary instance (optional)
+            resolution: Ticks per beat (quarter note)
+            max_seq_length: Maximum token sequence length for encoding
+        """
+        self.resolution = resolution
+        self.max_seq_length = max_seq_length
+        self.entries: List[MusicEntry] = entries or []
+        self.vocabulary = vocabulary or Vocabulary()
 
     def __len__(self) -> int:
+        """Number of music entries (songs/segments)."""
         return len(self.entries)
 
-    def add(self, music: muspy.Music, genre: str, song_id: str = "") -> None:
+    def add_entry(self, entry: MusicEntry) -> None:
         """
-        Add a music object with its genre.
-
-        Pre-computes and caches the drum pianoroll for this segment.
+        Add a MusicEntry to the dataset.
 
         Args:
-            music: MusPy Music object (may be a segment from preprocessing)
-            genre: Genre string
-            song_id: Unique identifier for the song (e.g., "Artist/SongName")
+            entry: MusicEntry object
         """
-        # Generate song_id if not provided
+        self.entries.append(entry)
+
+    def add(
+        self,
+        music: "muspy.Music",
+        genre: str,
+        song_id: str = "",
+    ) -> None:
+        """
+        Add a Music object with metadata.
+
+        Args:
+            music: muspy.Music object
+            genre: Genre string
+            song_id: Unique identifier (auto-generated if not provided)
+        """
         if not song_id:
             song_id = f"entry_{len(self.entries)}"
 
-        # Pre-compute drum pianoroll for this segment
-        drum_pianoroll = self._compute_drum_pianoroll(music)
+        # Register instruments in vocabulary
+        for track in music.tracks:
+            instrument_id = DRUM_PROGRAM_ID if track.is_drum else track.program
+            self.vocabulary.register_instrument_usage(instrument_id, song_id, genre)
 
         self.entries.append(MusicEntry(
             music=music,
             genre=genre,
             song_id=song_id,
-            drum_pianoroll=drum_pianoroll,
         ))
-        self.vocabulary.add_genre(genre)
-
-        # Register instrument usage for each track
-        for track in music.tracks:
-            instrument_id = self._get_instrument_id(track)
-            self.vocabulary.register_instrument_usage(instrument_id, song_id, genre)
-
-    def _track_to_pianoroll(self, track: muspy.Track, music: muspy.Music) -> np.ndarray:
-        """
-        Convert a single track to a pianoroll array using MusPy's built-in.
-
-        Args:
-            track: MusPy Track object
-            music: Parent Music object (for resolution info)
-
-        Returns:
-            np.ndarray of shape (128, max_time_steps)
-        """
-        # Create temporary Music with just this track to use MusPy's pianoroll
-        temp_music = muspy.Music(
-            resolution=music.resolution,
-            tempos=music.tempos,
-            tracks=[track],
-        )
-
-        # Use MusPy's built-in pianoroll representation (T, 128)
-        pianoroll = temp_music.to_representation("pianoroll")
-
-        # Transpose to (128, T) and binarize (note on/off, ignore velocity)
-        pianoroll = (pianoroll.T > 0).astype(np.float32)  # Binary: 0=off, 1=on
-
-        # Pad or truncate to max_time_steps
-        current_steps = pianoroll.shape[1]
-        if current_steps > self.max_time_steps:
-            pianoroll = pianoroll[:, :self.max_time_steps]
-        elif current_steps < self.max_time_steps:
-            padding = np.zeros((128, self.max_time_steps - current_steps), dtype=np.float32)
-            pianoroll = np.concatenate([pianoroll, padding], axis=1)
-
-        return pianoroll
-
-    def _get_instrument_id(self, track: muspy.Track) -> int:
-        """Get instrument ID for a track (program number or 128 for drums)."""
-        if track.is_drum:
-            return DRUM_PROGRAM_ID
-        return track.program
 
     def count_tracks(self) -> int:
         """Count total number of tracks across all entries."""
         return sum(len(entry.music.tracks) for entry in self.entries)
 
-    def _compute_drum_pianoroll(self, music: muspy.Music) -> Optional[np.ndarray]:
-        """
-        Compute the combined drum pianoroll for a Music object.
-
-        This is called at add() time to pre-compute and cache the drum pianoroll
-        for each segment.
-
-        Args:
-            music: MusPy Music object (possibly a segment)
-
-        Returns:
-            np.ndarray of shape (128, max_time_steps) or None if no drums
-        """
-        drum_tracks = [t for t in music.tracks if t.is_drum]
-        if not drum_tracks:
-            return None
-
-        # Create combined drum pianoroll
-        combined = np.zeros((128, self.max_time_steps), dtype=np.float32)
-
-        for track in drum_tracks:
-            pianoroll = self._track_to_pianoroll(track, music)
-            combined = np.maximum(combined, pianoroll)
-
-        return combined
-
-    def _get_drum_pianoroll(self, entry: MusicEntry) -> np.ndarray:
-        """
-        Get the drum pianoroll for an entry, using cached version if available.
-
-        Args:
-            entry: MusicEntry with cached drum_pianoroll
-
-        Returns:
-            np.ndarray of shape (128, max_time_steps), zeros if no drums
-        """
-        if entry.drum_pianoroll is not None:
-            return entry.drum_pianoroll
-
-        # Fallback: compute from music (for backward compatibility with old datasets)
-        computed = self._compute_drum_pianoroll(entry.music)
-        if computed is not None:
-            return computed
-
-        return np.zeros((128, self.max_time_steps), dtype=np.float32)
-
-    def _get_non_drum_tracks(self, music: muspy.Music) -> List[muspy.Track]:
-        """Get all non-drum tracks from a Music object."""
-        return [t for t in music.tracks if not t.is_drum]
-
-    def _get_drum_tracks(self, music: muspy.Music) -> List[muspy.Track]:
-        """Get all drum tracks from a Music object."""
-        return [t for t in music.tracks if t.is_drum]
-
-    def get_instruments_in_entry(self, entry_idx: int) -> List[Tuple[int, str]]:
-        """
-        Get list of instruments used in an entry.
-
-        Returns:
-            List of (instrument_id, instrument_name) tuples
-        """
-        entry = self.entries[entry_idx]
-        instruments = []
-        for track in entry.music.tracks:
-            inst_id = self._get_instrument_id(track)
-            inst_name = self.vocabulary.get_instrument_name(inst_id)
-            instruments.append((inst_id, inst_name))
-        return instruments
+    def _get_instrument_id(self, track: "muspy.Track") -> int:
+        """Get instrument ID from a track."""
+        return DRUM_PROGRAM_ID if track.is_drum else track.program
 
     def _get_base_song_id(self, song_id: str) -> str:
         """
-        Extract the base song ID by removing segment suffixes like '_seg0', '_seg1'.
+        Extract base song ID by removing segment suffixes like '_seg0' or '_0'.
 
-        This ensures all segments from the same original song are grouped together.
-
-        Args:
-            song_id: The song_id which may include segment suffix
-
-        Returns:
-            Base song ID without segment suffix
+        Ensures all segments from the same song are grouped together for splits.
         """
-        import re
-        # Remove segment suffix like "_seg0", "_seg1", etc.
-        return re.sub(r"_seg\d+$", "", song_id)
+        return re.sub(r"_\d+$", "", song_id)
 
     def to_tensorflow_dataset(
         self,
+        encoder: BaseEncoder,
         splits: Optional[Tuple[float, float, float]] = None,
         random_state: Optional[int] = None,
-        include_drums: bool = True,
-    ) -> Union[tf.data.Dataset, Dict[str, tf.data.Dataset]]:
+        include_metadata: bool = False,
+    ) -> Union["tf.data.Dataset", Dict[str, "tf.data.Dataset"]]:
         """
-        Convert to TensorFlow dataset with per-track samples.
+        Convert to TensorFlow dataset using the provided encoder.
 
-        Each sample contains:
-            - 'pianoroll': float32 (128, max_time_steps) - the track's notes
-            - 'instrument_id': int32 scalar - MIDI program number (0-127) or 128 for drums
-            - 'genre_id': int32 scalar - genre vocabulary ID
-            - 'drum_pianoroll': float32 (128, max_time_steps) - combined drum track (zeros if no drums)
+        Each track becomes a sample with:
+            - 'input_ids': int32 (max_seq_length,) - token sequence
+            - 'attention_mask': int32 (max_seq_length,) - 1=real, 0=padding
+            - 'labels': int32 (max_seq_length,) - shifted for next-token prediction
+
+        Optionally includes metadata:
+            - 'genre_id': int32 scalar
+            - 'instrument_id': int32 scalar
 
         Args:
-            splits: Optional (train, val, test) proportions, e.g. (0.8, 0.1, 0.1)
+            encoder: BaseEncoder instance (EventEncoder or REMIEncoder)
+            splits: Optional (train, val, test) proportions, e.g., (0.8, 0.1, 0.1)
             random_state: Random seed for reproducible splits
-            include_drums: Whether to include drum_pianoroll in output
+            include_metadata: Whether to include genre_id and instrument_id
 
         Returns:
             Single dataset if splits is None, otherwise dict with 'train', 'validation', 'test'
-
-        Note:
-            When using splits, entries are grouped by base song ID to ensure that
-            segments from the same song never appear in different splits (preventing data leakage).
         """
-        # Pre-flatten all tracks into a list of (entry_idx, track_idx)
+        import tensorflow as tf
+
+        # Pre-flatten all tracks into (entry_idx, track_idx) tuples
         track_indices: List[Tuple[int, int]] = []
         for entry_idx, entry in enumerate(self.entries):
             for track_idx in range(len(entry.music.tracks)):
@@ -265,32 +173,43 @@ class MusicDataset:
                 if len(track.notes) == 0:
                     continue
 
-                pianoroll = self._track_to_pianoroll(track, entry.music)
-                instrument_id = self._get_instrument_id(track)
+                # Get IDs
                 genre_id = self.vocabulary.get_genre_id(entry.genre)
+                instrument_id = self._get_instrument_id(track)
+
+                # Encode track
+                encoded = encoder.encode_track(
+                    track=track,
+                    genre_id=genre_id,
+                    instrument_id=instrument_id,
+                    max_length=self.max_seq_length,
+                )
+
+                # Create labels (shifted by 1)
+                labels = encoder.create_labels(encoded.token_ids)
 
                 sample = {
-                    "pianoroll": pianoroll,
-                    "instrument_id": np.int32(instrument_id),
-                    "genre_id": np.int32(genre_id),
+                    "input_ids": encoded.token_ids,
+                    "attention_mask": encoded.attention_mask,
+                    "labels": labels,
                 }
 
-                if include_drums:
-                    # Get cached drum pianoroll for this segment
-                    sample["drum_pianoroll"] = self._get_drum_pianoroll(entry)
+                if include_metadata:
+                    sample["genre_id"] = np.int32(genre_id)
+                    sample["instrument_id"] = np.int32(instrument_id)
 
                 yield sample
 
+        # Build output signature
         output_signature = {
-            "pianoroll": tf.TensorSpec(shape=(128, self.max_time_steps), dtype=tf.float32),  # type: ignore
-            "instrument_id": tf.TensorSpec(shape=(), dtype=tf.int32),  # type: ignore
-            "genre_id": tf.TensorSpec(shape=(), dtype=tf.int32),  # type: ignore
+            "input_ids": tf.TensorSpec(shape=(self.max_seq_length,), dtype=tf.int32),
+            "attention_mask": tf.TensorSpec(shape=(self.max_seq_length,), dtype=tf.int32),
+            "labels": tf.TensorSpec(shape=(self.max_seq_length,), dtype=tf.int32),
         }
 
-        if include_drums:
-            output_signature["drum_pianoroll"] = tf.TensorSpec(
-                shape=(128, self.max_time_steps), dtype=tf.float32  # type: ignore
-            )
+        if include_metadata:
+            output_signature["genre_id"] = tf.TensorSpec(shape=(), dtype=tf.int32)
+            output_signature["instrument_id"] = tf.TensorSpec(shape=(), dtype=tf.int32)
 
         if splits is None:
             return tf.data.Dataset.from_generator(
@@ -299,7 +218,6 @@ class MusicDataset:
             )
 
         # Handle splits - group by base song ID to prevent data leakage
-        # All segments from the same song must be in the same split
         if random_state is not None:
             np.random.seed(random_state)
 
@@ -311,11 +229,11 @@ class MusicDataset:
                 song_to_entries[base_song_id] = []
             song_to_entries[base_song_id].append(entry_idx)
 
-        # Shuffle the unique song IDs
+        # Shuffle unique song IDs
         unique_songs = list(song_to_entries.keys())
         np.random.shuffle(unique_songs)
 
-        # Split at the song level
+        # Split at song level
         n_songs = len(unique_songs)
         train_end = int(n_songs * splits[0])
         val_end = train_end + int(n_songs * splits[1])
@@ -324,7 +242,7 @@ class MusicDataset:
         val_songs = set(unique_songs[train_end:val_end])
         test_songs = set(unique_songs[val_end:])
 
-        # Collect track indices for each split based on song membership
+        # Collect track indices for each split
         train_idx: List[Tuple[int, int]] = []
         val_idx: List[Tuple[int, int]] = []
         test_idx: List[Tuple[int, int]] = []
@@ -360,189 +278,105 @@ class MusicDataset:
             ),
         }
 
-    def _track_to_events(
+    def to_multitrack_dataset(
         self,
-        track: muspy.Track,
-        music: muspy.Music,
-        encode_velocity: bool = False,
-    ) -> List[Tuple[str, int]]:
-        """
-        Convert a single track to event representation.
-
-        Converts notes to a sequence of note-on, note-off, and time-shift events.
-
-        Args:
-            track: MusPy Track object
-            music: Parent Music object (for resolution)
-            encode_velocity: Whether to include velocity events
-
-        Returns:
-            List of (event_type, value) tuples
-        """
-        if not track.notes:
-            return []
-
-        # Build list of all events: (time, event_type, pitch, velocity)
-        # event_type: 0 = note_on, 1 = note_off
-        all_events = []
-        for note in track.notes:
-            # Note-on event
-            all_events.append((note.time, 0, note.pitch, note.velocity))
-            # Note-off event
-            all_events.append((note.time + note.duration, 1, note.pitch, 0))
-
-        if not all_events:
-            return []
-
-        # Sort by time, then note-offs before note-ons at same time
-        all_events.sort(key=lambda x: (x[0], x[1]))
-
-        events = []
-        current_time = 0
-
-        for time, event_type, pitch, velocity in all_events:
-            # Clamp pitch to valid range
-            pitch = max(0, min(127, pitch))
-
-            # Add time shift if needed
-            time_diff = time - current_time
-            if time_diff > 0:
-                events.append(('time_shift', time_diff))
-                current_time = time
-
-            if event_type == 0:  # note_on
-                # Add velocity if requested
-                if encode_velocity and velocity > 0:
-                    events.append(('velocity', velocity))
-                events.append(('note_on', pitch))
-            else:  # note_off
-                events.append(('note_off', pitch))
-
-        return events
-
-    def to_event_tensorflow_dataset(
-        self,
-        event_vocab: EventVocabulary,
-        max_seq_length: int = 2048,
+        encoder: "MultiTrackEncoder",
         splits: Optional[Tuple[float, float, float]] = None,
         random_state: Optional[int] = None,
-        encode_velocity: bool = False,
-    ) -> Union[tf.data.Dataset, Dict[str, tf.data.Dataset]]:
+        min_tracks: int = 2,
+    ) -> Union["tf.data.Dataset", Dict[str, "tf.data.Dataset"]]:
         """
-        Convert to TensorFlow dataset with event sequences for Transformer training.
+        Convert to TensorFlow dataset using multi-track encoding.
 
-        Each sample contains:
-            - 'input_ids': int32 (max_seq_length,) - token sequence
-            - 'attention_mask': int32 (max_seq_length,) - 1 for real tokens, 0 for padding
-            - 'labels': int32 (max_seq_length,) - input shifted by 1 for next-token prediction
+        Each entry (full song) becomes a sample with all tracks interleaved.
+        This allows the model to learn relationships between all instruments.
 
         Args:
-            event_vocab: EventVocabulary instance with genre/instrument counts configured
-            max_seq_length: Maximum sequence length including special tokens
+            encoder: MultiTrackEncoder instance
             splits: Optional (train, val, test) proportions
             random_state: Random seed for reproducible splits
-            encode_velocity: Whether to include velocity tokens
+            min_tracks: Minimum tracks required per entry
 
         Returns:
-            Single dataset if splits is None, otherwise dict with 'train', 'validation', 'test'
+            Single dataset or dict with train/validation/test
         """
-        # Pre-flatten all tracks into a list of (entry_idx, track_idx)
-        track_indices: List[Tuple[int, int]] = []
-        for entry_idx, entry in enumerate(self.entries):
-            for track_idx in range(len(entry.music.tracks)):
-                track_indices.append((entry_idx, track_idx))
+        import tensorflow as tf
+        from .encoders import MultiTrackEncoder
 
-        def generator(indices: List[Tuple[int, int]]):
-            for entry_idx, track_idx in indices:
+        # Filter entries with enough tracks
+        valid_indices = [
+            i for i, entry in enumerate(self.entries)
+            if len(entry.music.tracks) >= min_tracks
+            and sum(len(t.notes) for t in entry.music.tracks) > 0
+        ]
+
+        def generator(indices: List[int]):
+            for entry_idx in indices:
                 entry = self.entries[entry_idx]
-                track = entry.music.tracks[track_idx]
 
-                # Skip empty tracks
-                if len(track.notes) == 0:
-                    continue
-
-                # Convert track to events
-                events = self._track_to_events(track, entry.music, encode_velocity)
-                if len(events) == 0:
-                    continue
-
-                # Get IDs
+                # Get genre ID
                 genre_id = self.vocabulary.get_genre_id(entry.genre)
-                instrument_id = self._get_instrument_id(track)
+                if genre_id < 0:
+                    genre_id = 0
 
-                # Encode to token sequence
-                input_ids, attention_mask = event_vocab.encode_events_to_sequence(
-                    events=[(e[0], e[1]) for e in events],
+                # Encode full multi-track music
+                encoded = encoder.encode_music(
+                    music=entry.music,
                     genre_id=genre_id,
-                    instrument_id=instrument_id,
-                    max_length=max_seq_length,
-                    encode_velocity=encode_velocity,
+                    max_length=self.max_seq_length,
                 )
 
-                # Create labels (input shifted by 1)
-                # labels[i] = input_ids[i+1], with PAD at the end
-                labels = np.concatenate([input_ids[1:], [event_vocab.PAD_TOKEN]])
+                # Create labels (shifted by 1)
+                labels = encoder.create_labels(encoded.token_ids)
 
                 yield {
-                    "input_ids": input_ids,
-                    "attention_mask": attention_mask,
-                    "labels": labels.astype(np.int32),
+                    "input_ids": encoded.token_ids,
+                    "attention_mask": encoded.attention_mask,
+                    "labels": labels,
                 }
 
+        # Output signature
         output_signature = {
-            "input_ids": tf.TensorSpec(shape=(max_seq_length,), dtype=tf.int32),
-            "attention_mask": tf.TensorSpec(shape=(max_seq_length,), dtype=tf.int32),
-            "labels": tf.TensorSpec(shape=(max_seq_length,), dtype=tf.int32),
+            "input_ids": tf.TensorSpec(shape=(self.max_seq_length,), dtype=tf.int32),
+            "attention_mask": tf.TensorSpec(shape=(self.max_seq_length,), dtype=tf.int32),
+            "labels": tf.TensorSpec(shape=(self.max_seq_length,), dtype=tf.int32),
         }
 
         if splits is None:
             return tf.data.Dataset.from_generator(
-                lambda: generator(track_indices),
+                lambda: generator(valid_indices),
                 output_signature=output_signature,
             )
 
-        # Handle splits - group by base song ID to prevent data leakage
+        # Handle splits by song
         if random_state is not None:
             np.random.seed(random_state)
 
-        # Group entry indices by base song ID
-        song_to_entries: Dict[str, List[int]] = {}
-        for entry_idx, entry in enumerate(self.entries):
-            base_song_id = self._get_base_song_id(entry.song_id)
-            if base_song_id not in song_to_entries:
-                song_to_entries[base_song_id] = []
-            song_to_entries[base_song_id].append(entry_idx)
+        # Group by base song ID
+        song_to_indices: Dict[str, List[int]] = {}
+        for idx in valid_indices:
+            base_id = self._get_base_song_id(self.entries[idx].song_id)
+            if base_id not in song_to_indices:
+                song_to_indices[base_id] = []
+            song_to_indices[base_id].append(idx)
 
-        # Shuffle the unique song IDs
-        unique_songs = list(song_to_entries.keys())
+        # Shuffle and split
+        unique_songs = list(song_to_indices.keys())
         np.random.shuffle(unique_songs)
 
-        # Split at the song level
-        n_songs = len(unique_songs)
-        train_end = int(n_songs * splits[0])
-        val_end = train_end + int(n_songs * splits[1])
+        n = len(unique_songs)
+        train_end = int(n * splits[0])
+        val_end = train_end + int(n * splits[1])
 
         train_songs = set(unique_songs[:train_end])
         val_songs = set(unique_songs[train_end:val_end])
         test_songs = set(unique_songs[val_end:])
 
-        # Collect track indices for each split based on song membership
-        train_idx: List[Tuple[int, int]] = []
-        val_idx: List[Tuple[int, int]] = []
-        test_idx: List[Tuple[int, int]] = []
+        # Collect indices
+        train_idx = [i for s in train_songs for i in song_to_indices[s]]
+        val_idx = [i for s in val_songs for i in song_to_indices[s]]
+        test_idx = [i for s in test_songs for i in song_to_indices[s]]
 
-        for entry_idx, entry in enumerate(self.entries):
-            base_song_id = self._get_base_song_id(entry.song_id)
-            for track_idx in range(len(entry.music.tracks)):
-                track_tuple = (entry_idx, track_idx)
-                if base_song_id in train_songs:
-                    train_idx.append(track_tuple)
-                elif base_song_id in val_songs:
-                    val_idx.append(track_tuple)
-                else:
-                    test_idx.append(track_tuple)
-
-        # Shuffle within each split
         np.random.shuffle(train_idx)
         np.random.shuffle(val_idx)
         np.random.shuffle(test_idx)
@@ -567,23 +401,23 @@ class MusicDataset:
         Save dataset to HDF5 file.
 
         Saves:
-            - Dataset metadata (resolution, max_time_steps)
-            - Vocabulary (genre mappings, instrument mappings)
-            - All music entries (pickled Music objects + genre strings + song_id)
+            - Metadata (resolution, max_seq_length)
+            - Vocabulary (genres, instruments, mappings)
+            - All music entries (pickled Music objects)
 
         Args:
             filepath: Path to save the .h5 file
         """
-        filepath = Path(filepath)  # type: ignore
-        filepath.parent.mkdir(parents=True, exist_ok=True)  # type: ignore
+        filepath = Path(filepath)
+        filepath.parent.mkdir(parents=True, exist_ok=True)
 
         with h5py.File(filepath, "w") as f:
             # Save metadata
             meta = f.create_group("metadata")
             meta.attrs["resolution"] = self.resolution
-            meta.attrs["max_time_steps"] = self.max_time_steps
+            meta.attrs["max_seq_length"] = self.max_seq_length
 
-            # Save vocabulary (full serialization including instruments)
+            # Save vocabulary
             vocab_group = f.create_group("vocabulary")
             vocab_group.attrs["genre_to_id"] = json.dumps(self.vocabulary.genre_to_id)
             vocab_group.attrs["artist_to_id"] = json.dumps(self.vocabulary.artist_to_id)
@@ -600,8 +434,6 @@ class MusicDataset:
 
             for idx, entry in enumerate(self.entries):
                 entry_group = entries_group.create_group(str(idx))
-
-                # Save genre and song_id as attributes
                 entry_group.attrs["genre"] = entry.genre
                 entry_group.attrs["song_id"] = entry.song_id
 
@@ -611,14 +443,6 @@ class MusicDataset:
                     "music_pickle",
                     data=np.frombuffer(music_bytes, dtype=np.uint8),
                 )
-
-                # Save cached drum pianoroll if present
-                if entry.drum_pianoroll is not None:
-                    entry_group.create_dataset(
-                        "drum_pianoroll",
-                        data=entry.drum_pianoroll,
-                        compression="gzip",
-                    )
 
     @classmethod
     def load(cls, filepath: str) -> "MusicDataset":
@@ -633,49 +457,117 @@ class MusicDataset:
         """
         with h5py.File(filepath, "r") as f:
             # Load metadata
-            resolution = int(f["metadata"].attrs["resolution"])  # type: ignore
-            max_time_steps = int(f["metadata"].attrs["max_time_steps"])  # type: ignore
+            resolution = int(f["metadata"].attrs["resolution"])
+            max_seq_length = int(f["metadata"].attrs["max_seq_length"])
 
             # Create dataset
-            dataset = cls(resolution=resolution, max_time_steps=max_time_steps)
+            dataset = cls(resolution=resolution, max_seq_length=max_seq_length)
 
             # Load vocabulary
-            dataset.vocabulary.genre_to_id = json.loads(f["vocabulary"].attrs["genre_to_id"])  # type: ignore
-            dataset.vocabulary.artist_to_id = json.loads(f["vocabulary"].attrs["artist_to_id"])  # type: ignore
+            dataset.vocabulary.genre_to_id = json.loads(f["vocabulary"].attrs["genre_to_id"])
+            dataset.vocabulary.artist_to_id = json.loads(f["vocabulary"].attrs["artist_to_id"])
 
-            # Load instrument mappings (if present, for backward compatibility)
             if "instrument_to_songs" in f["vocabulary"].attrs:
-                inst_to_songs = json.loads(f["vocabulary"].attrs["instrument_to_songs"])  # type: ignore
+                inst_to_songs = json.loads(f["vocabulary"].attrs["instrument_to_songs"])
                 for k, v in inst_to_songs.items():
                     dataset.vocabulary.instrument_to_songs[int(k)] = set(v)
 
             if "genre_to_instruments" in f["vocabulary"].attrs:
-                genre_to_inst = json.loads(f["vocabulary"].attrs["genre_to_instruments"])  # type: ignore
+                genre_to_inst = json.loads(f["vocabulary"].attrs["genre_to_instruments"])
                 for k, v in genre_to_inst.items():
                     dataset.vocabulary.genre_to_instruments[k] = set(v)
 
             # Load entries
             entries_group = f["entries"]
-            count = int(entries_group.attrs["count"])  # type: ignore
+            count = int(entries_group.attrs["count"])
 
             for idx in range(count):
-                entry_group = entries_group[str(idx)]  # type: ignore
-
+                entry_group = entries_group[str(idx)]
                 genre = entry_group.attrs["genre"]
                 song_id = entry_group.attrs.get("song_id", f"entry_{idx}")
-                music_bytes = entry_group["music_pickle"][:].tobytes()  # type: ignore
+                music_bytes = entry_group["music_pickle"][:].tobytes()
                 music = pickle.loads(music_bytes)
-
-                # Load cached drum pianoroll if present
-                drum_pianoroll = None
-                if "drum_pianoroll" in entry_group:
-                    drum_pianoroll = entry_group["drum_pianoroll"][:]  # type: ignore
 
                 dataset.entries.append(MusicEntry(
                     music=music,
                     genre=genre,
                     song_id=song_id,
-                    drum_pianoroll=drum_pianoroll,
                 ))
 
         return dataset
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get dataset statistics."""
+        total_notes = 0
+        total_duration = 0
+
+        for entry in self.entries:
+            for track in entry.music.tracks:
+                total_notes += len(track.notes)
+                if track.notes:
+                    max_time = max(n.time + n.duration for n in track.notes)
+                    total_duration = max(total_duration, max_time)
+
+        return {
+            "num_entries": len(self.entries),
+            "num_tracks": self.count_tracks(),
+            "num_genres": self.vocabulary.num_genres,
+            "genres": self.vocabulary.genres,
+            "num_active_instruments": self.vocabulary.num_active_instruments,
+            "total_notes": total_notes,
+            "resolution": self.resolution,
+            "max_seq_length": self.max_seq_length,
+        }
+
+    def get_instrument_stats(self, top_n: Optional[int] = None) -> List[Tuple[str, int]]:
+        """
+        Get instrument usage statistics sorted by frequency.
+
+        Args:
+            top_n: If provided, only return the top N instruments
+
+        Returns:
+            List of (instrument_name, song_count) tuples sorted by count (descending)
+        """
+        stats = self.vocabulary.get_instrument_stats()
+        sorted_stats = sorted(stats.items(), key=lambda x: x[1], reverse=True)
+
+        if top_n is not None:
+            return sorted_stats[:top_n]
+        return sorted_stats
+
+    def print_instrument_stats(self, top_n: int = 20) -> None:
+        """
+        Print a formatted table of instrument usage statistics.
+
+        Args:
+            top_n: Number of top instruments to display
+        """
+        stats = self.get_instrument_stats(top_n)
+
+        if not stats:
+            print("No instrument usage data available.")
+            return
+
+        print("\n" + "=" * 50)
+        print("  Instrument Usage Statistics")
+        print("=" * 50)
+        print(f"{'Rank':<6} {'Instrument':<30} {'Songs':<10}")
+        print("-" * 50)
+
+        for rank, (instrument, count) in enumerate(stats, 1):
+            print(f"{rank:<6} {instrument:<30} {count:<10}")
+
+        total_instruments = self.vocabulary.num_active_instruments
+        if total_instruments > top_n:
+            print(f"\n... and {total_instruments - top_n} more instruments")
+
+        print("=" * 50)
+
+    def __repr__(self) -> str:
+        return (
+            f"MusicDataset(entries={len(self.entries)}, "
+            f"tracks={self.count_tracks()}, "
+            f"genres={self.vocabulary.num_genres}, "
+            f"resolution={self.resolution})"
+        )

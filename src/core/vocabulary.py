@@ -1,8 +1,14 @@
-from typing import Dict, Optional, List, Set
+"""
+Vocabulary for tracking genre, artist, and instrument mappings.
+
+Author: Murilo de Freitas Spinelli
+"""
+
+from typing import Dict, Optional, List, Set, Any
 import json
 
 
-# General MIDI Instrument Names (0-127) + Drums (128)
+# General MIDI Instrument Names (0-127) + Drums (128) (created using Claude Opus 4.5)
 GENERAL_MIDI_INSTRUMENTS: Dict[int, str] = {
     # Piano (0-7)
     0: "Acoustic Grand Piano", 1: "Bright Acoustic Piano", 2: "Electric Grand Piano",
@@ -62,23 +68,39 @@ GENERAL_MIDI_INSTRUMENTS: Dict[int, str] = {
 # Reverse mapping: name -> id
 INSTRUMENT_NAME_TO_ID: Dict[str, int] = {name: id for id, name in GENERAL_MIDI_INSTRUMENTS.items()}
 
+# Drum program ID constant
+DRUM_PROGRAM_ID = 128
+
 
 class Vocabulary:
-    """Tracks genre, artist, and instrument mappings to integer IDs for the dataset."""
+    """
+    Tracks genre, artist, and instrument mappings to integer IDs.
+
+    Used for:
+        - Conditioning token generation (genre_id, instrument_id)
+        - Dataset statistics and filtering
+        - Instrument usage tracking per song/genre
+    """
 
     def __init__(
         self,
         genres: Optional[List[str]] = None,
-        artists: Optional[List[str]] = None
+        artists: Optional[List[str]] = None,
     ):
+        """
+        Initialize vocabulary.
+
+        Args:
+            genres: Optional list of genres to pre-register
+            artists: Optional list of artists to pre-register
+        """
         self.genre_to_id: Dict[str, int] = {}
         self.artist_to_id: Dict[str, int] = {}
 
-        # Instrument mappings
-        # instrument_to_id maps instrument names to their MIDI program numbers (0-128)
+        # Instrument mappings (MIDI program numbers)
         self.instrument_to_id: Dict[str, int] = INSTRUMENT_NAME_TO_ID.copy()
 
-        # Track which songs use which instruments: instrument_id -> set of song identifiers
+        # Track which songs use which instruments: instrument_id -> set of song_ids
         self.instrument_to_songs: Dict[int, Set[str]] = {i: set() for i in range(129)}
 
         # Track which instruments are used in which genre: genre -> set of instrument_ids
@@ -93,38 +115,67 @@ class Vocabulary:
                 self.add_artist(artist)
 
     def add_genre(self, genre: str) -> int:
-        """Add genre to vocabulary, returns its ID."""
         if genre not in self.genre_to_id:
             self.genre_to_id[genre] = len(self.genre_to_id)
         return self.genre_to_id[genre]
-
-    def add_artist(self, artist: str) -> int:
-        """Add artist to vocabulary, returns its ID."""
-        if artist not in self.artist_to_id:
-            self.artist_to_id[artist] = len(self.artist_to_id)
-        return self.artist_to_id[artist]
 
     def get_genre_id(self, genre: str) -> int:
         """Get genre ID, returns -1 if not found."""
         return self.genre_to_id.get(genre, -1)
 
+    def get_genre_name(self, genre_id: int) -> Optional[str]:
+        """Get genre name from ID, returns None if not found."""
+        for name, id_ in self.genre_to_id.items():
+            if id_ == genre_id:
+                return name
+        return None
+
+    @property
+    def num_genres(self) -> int:
+        """Number of registered genres."""
+        return len(self.genre_to_id)
+
+    @property
+    def genres(self) -> List[str]:
+        """List of all registered genres."""
+        return list(self.genre_to_id.keys())
+
+    def add_artist(self, artist: str) -> int:
+        if artist not in self.artist_to_id:
+            self.artist_to_id[artist] = len(self.artist_to_id)
+        return self.artist_to_id[artist]
+
     def get_artist_id(self, artist: str) -> int:
         """Get artist ID, returns -1 if not found."""
         return self.artist_to_id.get(artist, -1)
 
+    @property
+    def num_artists(self) -> int:
+        """Number of registered artists."""
+        return len(self.artist_to_id)
+
     def get_instrument_id(self, instrument: str) -> int:
-        """Get instrument ID (MIDI program number), returns -1 if not found."""
         return self.instrument_to_id.get(instrument, -1)
 
     def get_instrument_name(self, instrument_id: int) -> str:
         """Get instrument name from ID, returns 'Unknown' if not found."""
         return GENERAL_MIDI_INSTRUMENTS.get(instrument_id, "Unknown")
 
+    @property
+    def num_instruments(self) -> int:
+        """Total number of possible instruments (129: 0-127 + drums)."""
+        return 129
+
+    @property
+    def num_active_instruments(self) -> int:
+        """Number of instruments actually used in the dataset."""
+        return sum(1 for songs in self.instrument_to_songs.values() if len(songs) > 0)
+
     def register_instrument_usage(
         self,
         instrument_id: int,
         song_id: str,
-        genre: Optional[str] = None
+        genre: Optional[str] = None,
     ) -> None:
         """
         Register that a song uses a specific instrument.
@@ -154,18 +205,15 @@ class Vocabulary:
         self,
         genre: str,
         top_n: int = 3,
-        exclude_drums: bool = True
+        exclude_drums: bool = True,
     ) -> List[int]:
         """
         Get the top N most frequently used instruments for a genre.
 
-        Instruments are ranked by their global usage frequency (number of songs
-        that use them) among instruments that appear in this genre.
-
         Args:
-            genre: Genre name to get instruments for
+            genre: Genre name
             top_n: Number of instruments to return
-            exclude_drums: If True, exclude drums from the selection (drums=128)
+            exclude_drums: If True, exclude drums (128) from selection
 
         Returns:
             List of instrument IDs sorted by frequency (most frequent first)
@@ -175,15 +223,13 @@ class Vocabulary:
         if not genre_instruments:
             return []
 
-        # Filter out drums if requested
         if exclude_drums:
-            genre_instruments = {i for i in genre_instruments if i != 128}
+            genre_instruments = {i for i in genre_instruments if i != DRUM_PROGRAM_ID}
 
-        # Sort by global frequency (number of songs using each instrument)
         sorted_instruments = sorted(
             genre_instruments,
             key=lambda i: len(self.instrument_to_songs.get(i, set())),
-            reverse=True
+            reverse=True,
         )
 
         return sorted_instruments[:top_n]
@@ -196,26 +242,7 @@ class Vocabulary:
             if len(songs) > 0
         }
 
-    @property
-    def num_genres(self) -> int:
-        return len(self.genre_to_id)
-
-    @property
-    def num_artists(self) -> int:
-        return len(self.artist_to_id)
-
-    @property
-    def num_instruments(self) -> int:
-        """Total number of possible instruments (129: 0-127 + drums)."""
-        return 129
-
-    @property
-    def num_active_instruments(self) -> int:
-        """Number of instruments actually used in the dataset."""
-        return sum(1 for songs in self.instrument_to_songs.values() if len(songs) > 0)
-
-    def to_dict(self) -> dict:
-        """Serialize vocabulary to dict."""
+    def to_dict(self) -> Dict[str, Any]:
         return {
             "genre_to_id": self.genre_to_id,
             "artist_to_id": self.artist_to_id,
@@ -224,18 +251,16 @@ class Vocabulary:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "Vocabulary":
+    def from_dict(cls, data: Dict[str, Any]) -> "Vocabulary":
         """Deserialize vocabulary from dict."""
         vocab = cls()
         vocab.genre_to_id = data.get("genre_to_id", {})
         vocab.artist_to_id = data.get("artist_to_id", {})
 
-        # Load instrument-to-songs mapping
         inst_to_songs = data.get("instrument_to_songs", {})
         for k, v in inst_to_songs.items():
             vocab.instrument_to_songs[int(k)] = set(v)
 
-        # Load genre-to-instruments mapping
         genre_to_inst = data.get("genre_to_instruments", {})
         for k, v in genre_to_inst.items():
             vocab.genre_to_instruments[k] = set(v)
@@ -252,3 +277,10 @@ class Vocabulary:
         """Load vocabulary from JSON file."""
         with open(filepath, "r") as f:
             return cls.from_dict(json.load(f))
+
+    def __repr__(self) -> str:
+        return (
+            f"Vocabulary(num_genres={self.num_genres}, "
+            f"num_artists={self.num_artists}, "
+            f"num_active_instruments={self.num_active_instruments})"
+        )
