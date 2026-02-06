@@ -609,8 +609,12 @@ class ExperimentCLI:
 
         print_header("Dataset Info")
 
-        # Find datasets
-        datasets = list(Path(".").rglob("*.h5"))
+        # Find datasets in data/datasets only
+        datasets = []
+        dataset_dir = Path("data/datasets")
+        if dataset_dir.exists():
+            datasets = [d for d in dataset_dir.glob("*.h5") if "model_bundle" not in d.name]
+
         if datasets:
             print("\nFound datasets:")
             for i, ds in enumerate(datasets[:10], 1):
@@ -620,6 +624,12 @@ class ExperimentCLI:
         dataset_path = get_input("Dataset file path (.h5)")
         if not dataset_path:
             return
+
+        # Handle numeric selection
+        if dataset_path.isdigit():
+            idx = int(dataset_path) - 1
+            if 0 <= idx < len(datasets):
+                dataset_path = str(datasets[idx])
 
         if not Path(dataset_path).exists():
             print(f"\nDataset not found: {dataset_path}")
@@ -653,8 +663,29 @@ class ExperimentCLI:
 
         print_header("Instrument Statistics")
 
+        # Find datasets in data/datasets only
+        datasets = []
+        dataset_dir = Path("data/datasets")
+        if dataset_dir.exists():
+            datasets = [d for d in dataset_dir.glob("*.h5") if "model_bundle" not in d.name]
+
+        if datasets:
+            print("\nFound datasets:")
+            for i, ds in enumerate(datasets[:10], 1):
+                print(f"  [{i}] {ds}")
+            print()
+
         dataset_path = get_input("Dataset file path (.h5)")
-        if not dataset_path or not Path(dataset_path).exists():
+        if not dataset_path:
+            return
+
+        # Handle numeric selection
+        if dataset_path.isdigit():
+            idx = int(dataset_path) - 1
+            if 0 <= idx < len(datasets):
+                dataset_path = str(datasets[idx])
+
+        if not Path(dataset_path).exists():
             print("\nDataset not found")
             wait_for_enter()
             return
