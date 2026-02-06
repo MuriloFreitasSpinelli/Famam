@@ -135,12 +135,10 @@ def main():
             dataset_config = MusicDatasetConfig.load(str(dataset_config_path))
             resolution = dataset_config.resolution
             positions_per_bar = dataset_config.positions_per_bar
-            encode_velocity = dataset_config.encode_velocity
         else:
             print("\nNo dataset config found, using defaults")
             resolution = dataset.resolution
             positions_per_bar = 16
-            encode_velocity = True
 
         # Create encoder
         print("\nCreating encoder...")
@@ -148,7 +146,6 @@ def main():
             num_genres=max(1, dataset.vocabulary.num_genres),
             resolution=resolution,
             positions_per_bar=positions_per_bar,
-            encode_velocity=encode_velocity,
         )
         print(f"  Encoder: MultiTrackEncoder")
         print(f"  Vocab size: {encoder.vocab_size}")
