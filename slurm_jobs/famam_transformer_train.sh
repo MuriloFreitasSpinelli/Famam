@@ -99,7 +99,7 @@ echo "Starting training..."
 echo "  Dataset: $DATASET_LOCAL"
 echo "  Config: $TRAINING_CONFIG"
 
-python -m src_v4.client.cli train from-config \
+python -m src.cli.cluster_train \
     "$DATASET_LOCAL" \
     "$TRAINING_CONFIG" \
     --val-split 0.1
