@@ -162,8 +162,10 @@ def main():
             min_tracks=args.min_tracks,
         )
 
-        print(f"  Train samples: {len(datasets['train'])}")
-        print(f"  Validation samples: {len(datasets['validation'])}")
+        train_count = sum(1 for _ in datasets['train'])
+        val_count = sum(1 for _ in datasets['validation'])
+        print(f"  Train samples: {train_count}")
+        print(f"  Validation samples: {val_count}")
 
         # Initialize trainer
         print("\nInitializing trainer...")
