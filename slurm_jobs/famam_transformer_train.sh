@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --time=12:00:00
+#SBATCH --time=48:00:00
 #SBATCH --output=slurm_logs/%x_%j.out
 #SBATCH --error=slurm_logs/%x_%j.err
 
@@ -79,8 +79,8 @@ export PYTHONPATH="$PROJECT_DIR:$PYTHONPATH"
 # ============================================================
 # Configuration - EDIT THESE FOR YOUR RUN
 # ============================================================
-DATASET_SRC="data/datasets/multitrack_rock_cluster.h5"
-TRAINING_CONFIG="configs/model_training/multitrack_rock_cluster.json"
+DATASET_SRC="data/datasets/multitrack_rock_large.h5"
+TRAINING_CONFIG="configs/model_training/transformer_large.json"
 
 # ============================================================
 # Copy dataset to local SSD ($TMPDIR) for faster I/O
@@ -99,7 +99,7 @@ echo "Starting training..."
 echo "  Dataset: $DATASET_LOCAL"
 echo "  Config: $TRAINING_CONFIG"
 
-python -m src_v4.client.cli train from-config \
+python -m src.cli.cluster_train \
     "$DATASET_LOCAL" \
     "$TRAINING_CONFIG" \
     --val-split 0.1

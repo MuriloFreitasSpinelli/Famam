@@ -101,6 +101,9 @@ class MusicDataset:
         if not song_id:
             song_id = f"entry_{len(self.entries)}"
 
+        # Register genre in vocabulary
+        self.vocabulary.add_genre(genre)
+
         # Register instruments in vocabulary
         for track in music.tracks:
             instrument_id = DRUM_PROGRAM_ID if track.is_drum else track.program
