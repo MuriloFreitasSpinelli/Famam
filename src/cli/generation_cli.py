@@ -206,9 +206,11 @@ class GenerationCLI:
 
         print_header("Load Model")
 
-        # Find model bundles
-        bundles = list(Path(".").rglob("*.h5"))
-        model_bundles = [b for b in bundles if "model_bundle" in b.name or b.parent.name in ("checkpoints", "models")]
+        # Find model bundles in models directory only
+        model_bundles = []
+        models_dir = Path("models")
+        if models_dir.exists():
+            model_bundles = list(models_dir.rglob("*.h5"))
 
         if model_bundles:
             print("\nFound model bundles:")
@@ -221,6 +223,12 @@ class GenerationCLI:
         bundle_path = get_input("Model bundle path (.h5)")
         if not bundle_path:
             return
+
+        # Handle numeric selection
+        if bundle_path.isdigit():
+            idx = int(bundle_path) - 1
+            if 0 <= idx < len(model_bundles):
+                bundle_path = str(model_bundles[idx])
 
         if not Path(bundle_path).exists():
             print(f"\nFile not found: {bundle_path}")
