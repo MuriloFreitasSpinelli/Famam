@@ -3,6 +3,10 @@ data/midi/
 data/datasets/
 slurm_logs/
 
+# Model weights — too large for git, distributed via GitHub Releases
+models/**/*.keras
+models/**/*.h5
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
