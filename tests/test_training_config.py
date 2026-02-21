@@ -42,12 +42,10 @@ def test_training_config_instantiates():
         ):
             missing_required.append(name)
 
-    # If your TrainingConfig has required params we cannot guess safely,
-    # then this test should fail with a clear message so we can fill them correctly.
     assert not missing_required, f"TrainingConfig requires params we did not provide: {missing_required}"
 
     cfg = TrainingConfig(**kwargs)
 
-    # Basic sanity: object exists and has at least one attribute
+    # Object exists and has at least one attribute
     assert cfg is not None
     assert len(vars(cfg)) >= 0
