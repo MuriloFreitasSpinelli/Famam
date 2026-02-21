@@ -13,7 +13,7 @@ Token sequence structure:
      pos_2, inst_guitar, pitch_64, dur_8, vel_70,
      bar_1, ...]
 
-Author: Murilo de Freitas Spinelli
+Author: Murilo de Freitas Spinelli, Radu Cristea
 """
 
 from typing import List, Dict, Tuple, Optional, Set, Any

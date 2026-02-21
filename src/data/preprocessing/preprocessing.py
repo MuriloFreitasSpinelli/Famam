@@ -8,7 +8,7 @@ Handles:
     - Segmentation into fixed-length chunks
     - Augmentation (transposition, tempo variation)
 
-Author: Murilo de Freitas Spinelli
+Author: Murilo de Freitas Spinelli, Radu Cristea
 """
 
 from typing import List, Tuple, TYPE_CHECKING

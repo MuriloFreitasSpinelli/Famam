@@ -4,6 +4,8 @@ Music Generator GUI
 Graphical interface for music generation. Mirrors generation_cli.py exactly:
 uses the same model loading, instrument selection, generator creation, and
 generation logic.
+
+Author: Radu Cristea
 """
 
 import os
@@ -14,7 +16,6 @@ import threading
 from typing import Optional, List
 import sys
 
-# Suppress TF noise before any imports trigger it
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # Add project root so `src` is importable
@@ -35,16 +36,14 @@ class MusicGeneratorGUI:
         self.is_multitrack = False
         self.is_generating = False
         self.selected_instruments = None   # None = no filtering; list[int] = prog IDs
-        self._top_instruments: List[tuple] = []  # [(prog_id, name, count), ...]
+        self._top_instruments: List[tuple] = []
 
         self._create_ui()
         self.root.grid_rowconfigure(0, weight=1)
         self.root.grid_columnconfigure(0, weight=1)
 
-    # =========================================================================
     # UI Construction
-    # =========================================================================
-
+    
     def _create_ui(self):
         main = ttk.Frame(self.root, padding="10")
         main.grid(row=0, column=0, sticky="nsew")
@@ -53,7 +52,7 @@ class MusicGeneratorGUI:
         ttk.Label(main, text="Music Generator", font=("Helvetica", 18, "bold")).grid(
             row=0, column=0, pady=(0, 12))
 
-        # --- 1. Model Loading ---
+        # Model Loading
         mf = ttk.LabelFrame(main, text="1. Load Model", padding="10")
         mf.grid(row=1, column=0, sticky="ew", pady=(0, 8))
         mf.grid_columnconfigure(1, weight=1)
@@ -68,7 +67,7 @@ class MusicGeneratorGUI:
         ttk.Label(mf, textvariable=self.model_info_var, foreground="blue",
                   font=("Helvetica", 9)).grid(row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
-        # --- 2. Generation Parameters ---
+        # Generation Parameters
         pf = ttk.LabelFrame(main, text="2. Generation Parameters", padding="10")
         pf.grid(row=2, column=0, sticky="ew", pady=(0, 8))
         pf.grid_columnconfigure(1, weight=1)
@@ -125,7 +124,7 @@ class MusicGeneratorGUI:
                   font=("Helvetica", 8)).grid(row=0, column=1)
         r += 1
 
-        # Top-p (nucleus sampling)
+        # Top-p
         ttk.Label(pf, text="Nucleus (top-p):").grid(row=r, column=0, sticky="w", pady=4)
         tp_row = ttk.Frame(pf)
         tp_row.grid(row=r, column=1, sticky="w", padx=(10, 0), pady=4)
@@ -138,7 +137,7 @@ class MusicGeneratorGUI:
                   font=("Helvetica", 8)).grid(row=0, column=1)
         r += 1
 
-        # Bars to generate (multitrack only)
+        # Bars to generate 
         ttk.Label(pf, text="Bars to Generate:").grid(row=r, column=0, sticky="w", pady=4)
         bars_row = ttk.Frame(pf)
         bars_row.grid(row=r, column=1, sticky="w", padx=(10, 0), pady=4)
@@ -179,7 +178,7 @@ class MusicGeneratorGUI:
                                                     state="disabled")
         self.exclude_drums_check.grid(row=r, column=1, sticky="w", padx=(10, 0), pady=4)
 
-        # --- 3. Output ---
+        # Output
         of = ttk.LabelFrame(main, text="3. Output", padding="10")
         of.grid(row=3, column=0, sticky="ew", pady=(0, 8))
         of.grid_columnconfigure(1, weight=1)
@@ -196,7 +195,7 @@ class MusicGeneratorGUI:
         ttk.Entry(of, textvariable=self.prefix_var).grid(
             row=1, column=1, sticky="ew", padx=(0, 8), pady=(6, 0))
 
-        # --- Buttons ---
+        # Buttons
         bf = ttk.Frame(main)
         bf.grid(row=4, column=0, pady=8)
         self.generate_btn = ttk.Button(bf, text="Generate Music", command=self._start_generation,
@@ -206,7 +205,6 @@ class MusicGeneratorGUI:
                                      state="disabled")
         self.cancel_btn.pack(side="left", padx=5)
 
-        # --- Log / Progress ---
         lf = ttk.LabelFrame(main, text="Log", padding="10")
         lf.grid(row=5, column=0, sticky="nsew", pady=(0, 8))
         lf.grid_columnconfigure(0, weight=1)
@@ -220,14 +218,12 @@ class MusicGeneratorGUI:
                                                   wrap="word", font=("Courier", 9))
         self.log_text.grid(row=1, column=0, sticky="nsew")
 
-        # Status bar
+        # Status bar   
         self.status_var = tk.StringVar(value="Ready. Load a model to begin.")
         ttk.Label(main, textvariable=self.status_var, relief="sunken", anchor="w").grid(
             row=6, column=0, sticky="ew")
 
-    # =========================================================================
     # Model Loading
-    # =========================================================================
 
     def _load_model(self):
         filepath = filedialog.askopenfilename(
@@ -251,7 +247,6 @@ class MusicGeneratorGUI:
             bundle = load_model_bundle(filepath)
             is_multitrack = isinstance(bundle.encoder, MultiTrackEncoder)
 
-            # Build top-instruments list exactly as CLI._get_top_instruments()
             top_instruments = []
             if bundle.vocabulary:
                 stats = bundle.vocabulary.get_instrument_stats()
@@ -277,7 +272,6 @@ class MusicGeneratorGUI:
         self._top_instruments = top_instruments
         self.selected_instruments = None
 
-        # Genres sorted by ID (same order as CLI)
         genres = []
         if bundle.vocabulary:
             genres = [name for name, _ in
@@ -325,17 +319,13 @@ class MusicGeneratorGUI:
             except Exception:
                 pass
 
-        # Combobox uses "readonly" when enabled
         self.genre_combo['state'] = "disabled" if state == "disabled" else "readonly"
 
-        # Instrument button only makes sense for multitrack
         self.inst_select_btn['state'] = (
             "normal" if (state == "normal" and self.is_multitrack) else "disabled"
         )
 
-    # =========================================================================
     # Instrument Selection Dialog
-    # =========================================================================
 
     def _open_instrument_dialog(self):
         if not self._top_instruments:
@@ -377,7 +367,6 @@ class MusicGeneratorGUI:
             tag = " [DRUMS]" if prog_id == 128 else ""
             tree.insert("", "end", values=(rank, prog_id, name + tag, count))
 
-        # Custom IDs entry
         custom_frame = ttk.Frame(dialog)
         custom_frame.pack(fill="x", padx=12, pady=(0, 4))
         ttk.Label(custom_frame,
@@ -385,8 +374,7 @@ class MusicGeneratorGUI:
         custom_entry = ttk.Entry(custom_frame)
         custom_entry.pack(fill="x", pady=(2, 0))
 
-        # Result captured via list (accessible inside nested functions)
-        result = [self.selected_instruments]  # pre-fill with current selection
+        result = [self.selected_instruments]  
 
         def pick(n):
             result[0] = [prog_id for prog_id, _, _ in self._top_instruments[:n]]
@@ -432,9 +420,7 @@ class MusicGeneratorGUI:
             names = [GENERAL_MIDI_INSTRUMENTS.get(p, "Drums") for p in self.selected_instruments]
             self.inst_display_var.set(", ".join(names))
 
-    # =========================================================================
     # Output helpers
-    # =========================================================================
 
     def _select_output_dir(self):
         d = filedialog.askdirectory(title="Select Output Directory")
@@ -444,9 +430,7 @@ class MusicGeneratorGUI:
     def _on_temp_changed(self, val):
         self.temp_label.config(text=f"{float(val):.2f}")
 
-    # =========================================================================
     # Generation
-    # =========================================================================
 
     def _start_generation(self):
         if not self.bundle:
@@ -479,13 +463,12 @@ class MusicGeneratorGUI:
             max_length        = self.max_length_var.get()
             num_songs         = self.num_songs_var.get()
             exclude_drums     = self.exclude_drums_var.get()
-            allowed_instruments = self.selected_instruments  # None or list[int]
+            allowed_instruments = self.selected_instruments 
 
             output_dir = Path(self.output_path_var.get())
             prefix     = self.prefix_var.get() or "generated"
             output_dir.mkdir(parents=True, exist_ok=True)
 
-            # Log summary
             self._log(f"\n{'='*55}")
             self._log("Starting generation")
             self._log(f"  Genre:        {genre_name} (ID: {genre_id})")
@@ -503,7 +486,6 @@ class MusicGeneratorGUI:
             self._log(f"  Songs:        {num_songs}")
             self._log(f"{'='*55}\n")
 
-            # Create generator once — reused across all songs (same as CLI)
             if self.is_multitrack:
                 config = PolyGeneratorConfig(
                     max_length=max_length,
@@ -642,9 +624,7 @@ class MusicGeneratorGUI:
         self.cancel_btn['state'] = "disabled"
         self.progress_bar.stop()
 
-    # =========================================================================
     # Logging
-    # =========================================================================
 
     def _log(self, message: str):
         def _append():
@@ -658,10 +638,7 @@ class MusicGeneratorGUI:
         else:
             self.root.after(0, _append)
 
-
-# =============================================================================
 # Entry Point
-# =============================================================================
 
 def main():
     """Run the GUI."""
