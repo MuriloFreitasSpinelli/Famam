@@ -9,7 +9,7 @@ See 'python -m src_v4 --help' for available commands.
 """
 
 import sys
-from .client.cli import main
+from .cli.__main__ import main
 
 if __name__ == "__main__":
     sys.exit(main())
