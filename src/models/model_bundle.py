@@ -1,7 +1,7 @@
 """
 ModelBundle: Bundles a trained model with its encoder and config for inference.
 
-Author: Murilo de Freitas Spinelli
+Author: Radu Cristea
 """
 
 import json
@@ -274,11 +274,29 @@ class ModelBundle:
 
         # Load Keras model
         print(f"Loading {model_type} model from: {model_path}")
-        model = keras.models.load_model(
-            model_path,
-            custom_objects=default_custom_objects,
-            compile=False,
-        )
+        try:
+            # Try with keras first (works for .keras and .h5 files)
+            model = keras.models.load_model(
+                model_path,
+                custom_objects=default_custom_objects,
+                compile=False,
+            )
+        except (ValueError, FileNotFoundError) as e:
+            # If keras fails, try TensorFlow (handles SavedModel format)
+            if "File format not supported" in str(e) or "SavedModel" in str(e):
+                print(f"  Keras failed, trying TensorFlow for SavedModel format...")
+                try:
+                    import tensorflow as tf
+                    model = tf.keras.models.load_model(
+                        model_path,
+                        custom_objects=default_custom_objects,
+                        compile=False,
+                    )
+                except Exception as tf_error:
+                    print(f"  TensorFlow also failed: {tf_error}")
+                    raise e
+            else:
+                raise
 
         bundle = cls(
             model=model,
