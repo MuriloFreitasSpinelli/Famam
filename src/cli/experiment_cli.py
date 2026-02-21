@@ -959,7 +959,7 @@ class ExperimentCLI:
             dataset_config_path = Path(dataset_path).with_suffix('.config.json')
             encoder_type = "multitrack"  # default
             resolution = dataset.resolution
-            positions_per_bar = 32
+            positions_per_bar = 16
             encode_velocity = True
 
             if dataset_config_path.exists():
@@ -998,7 +998,6 @@ class ExperimentCLI:
                     num_genres=vocabulary.num_genres,
                     resolution=resolution,
                     positions_per_bar=positions_per_bar,
-                    encode_velocity=encode_velocity,
                 )
             print(f"  Vocab size: {encoder.vocab_size}")
 

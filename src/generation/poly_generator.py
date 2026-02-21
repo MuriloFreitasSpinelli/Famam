@@ -7,6 +7,7 @@ All instruments are aware of each other during generation.
 Author: Murilo de Freitas Spinelli
 """
 
+import math
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Union, TYPE_CHECKING
 from pathlib import Path
@@ -66,6 +67,7 @@ class PolyGenerator(BaseGenerator):
         top_k: Optional[int] = None,
         top_p: Optional[float] = None,
         seed: Optional[int] = None,
+        ignore_eos: bool = False,
     ) -> np.ndarray:
         """
         Generate interleaved multi-track token sequence.
@@ -78,6 +80,8 @@ class PolyGenerator(BaseGenerator):
             top_k: Top-k sampling
             top_p: Nucleus sampling
             seed: Random seed
+            ignore_eos: If True, suppress EOS stopping so generation runs to
+                        max_length. Use this when a specific bar count is required.
 
         Returns:
             Array of generated tokens (interleaved multi-track)
@@ -102,13 +106,14 @@ class PolyGenerator(BaseGenerator):
         start_tokens = self._prepare_start_tokens(start_tokens)
 
         # Generate
+        eos_id = None if ignore_eos else self.encoder.eos_token_id
         tokens = self.model.generate(
             start_tokens=start_tokens,
             max_length=params['max_length'],
             temperature=params['temperature'],
             top_k=params['top_k'],
             top_p=params['top_p'],
-            eos_token_id=self.encoder.eos_token_id,
+            eos_token_id=eos_id,
         )
 
         return self._extract_tokens(tokens)
@@ -146,8 +151,11 @@ class PolyGenerator(BaseGenerator):
         min_total_notes = min_total_notes or self.config.min_total_notes
         max_retries = max_retries or self.config.max_retries
 
-        # Estimate sequence length based on bars
-        estimated_length = min(num_bars * 100, self.config.max_length)
+        # Interleaved multitrack sequences are dense: ~200-300 tokens per bar.
+        # Ignore EOS so the model is forced to fill the full token budget,
+        # then trim the decoded music to exactly num_bars afterward.
+        ticks_per_bar = self.config.resolution * 4
+        estimated_length = min(num_bars * 250, self.config.max_length)
 
         best_music = None
         best_score = 0
@@ -158,6 +166,7 @@ class PolyGenerator(BaseGenerator):
                 instruments=instruments,
                 max_length=estimated_length,
                 temperature=temperature,
+                ignore_eos=True,
             )
 
             music = self.encoder.decode_to_music(
@@ -165,6 +174,9 @@ class PolyGenerator(BaseGenerator):
                 resolution=self.config.resolution,
                 tempo=self.config.tempo,
             )
+
+            # Hard-trim to the requested bar count
+            music = self._trim_to_bars(music, num_bars, ticks_per_bar)
 
             total_notes = sum(len(t.notes) for t in music.tracks)
             num_tracks_with_notes = sum(
@@ -219,10 +231,11 @@ class PolyGenerator(BaseGenerator):
         prompt_tokens = prompt_tokens[prompt_tokens != self.encoder.eos_token_id]
         prompt_tokens = prompt_tokens[prompt_tokens != self.encoder.pad_token_id]
 
-        # Generate continuation
+        # Generate continuation — same token budget as generate_music (~250/bar),
+        # and suppress EOS so the model is forced to fill the requested bars.
         prompt_tensor = self._prepare_start_tokens(prompt_tokens)
 
-        continuation_length = continuation_bars * 50
+        continuation_length = continuation_bars * 250
         total_length = min(len(prompt_tokens) + continuation_length, self.config.max_length)
 
         tokens = self.model.generate(
@@ -231,7 +244,7 @@ class PolyGenerator(BaseGenerator):
             temperature=temperature or self.config.temperature,
             top_k=self.config.top_k,
             top_p=self.config.top_p,
-            eos_token_id=self.encoder.eos_token_id,
+            eos_token_id=None,
         )
 
         tokens = self._extract_tokens(tokens)
@@ -282,12 +295,17 @@ class PolyGenerator(BaseGenerator):
                 tempo=self.config.tempo,
             )
 
-            # Get segment duration
+            # Get segment duration, snapped up to the next full bar boundary
+            # so every segment starts exactly on a bar line.
+            ticks_per_bar = self.config.resolution * 4
             segment_duration = 0
             for track in music.tracks:
                 if track.notes:
                     track_end = max(n.time + n.duration for n in track.notes)
                     segment_duration = max(segment_duration, track_end)
+            if segment_duration > 0:
+                bars = math.ceil(segment_duration / ticks_per_bar)
+                segment_duration = bars * ticks_per_bar
 
             # Add notes with time offset
             for track in music.tracks:
@@ -325,6 +343,198 @@ class PolyGenerator(BaseGenerator):
             final_music.tracks.append(track)
 
         return final_music
+
+    def generate_continuation(
+        self,
+        total_bars: int = 32,
+        initial_bars: int = 16,
+        chunk_bars: int = 4,
+        context_bars: int = 8,
+        genre_id: int = 0,
+        instruments: Optional[List[int]] = None,
+        temperature: Optional[float] = None,
+    ) -> muspy.Music:
+        """
+        Generate a long piece by extending in aligned chunks with sliding context.
+
+        Generates an initial seed, then repeatedly feeds the last N bars as
+        a prompt to produce the next chunk. Each chunk is bar-aligned so the
+        piece stays in a 4-by-4 phrase structure.
+
+        Args:
+            total_bars: Target total length of the piece in bars
+            initial_bars: Bars to generate in the initial seed
+            chunk_bars: How many new bars to generate per extension step
+            context_bars: How many bars of history the model sees as prompt
+            genre_id: Genre conditioning ID
+            instruments: Instrument hints
+            temperature: Sampling temperature
+
+        Returns:
+            muspy.Music with the full extended piece
+        """
+        ticks_per_bar = self.config.resolution * 4
+
+        # A single model pass can fit roughly max_length // 250 bars.
+        # Cap the seed to that so generate_music always fills its full budget,
+        # then the continuation loop extends to initial_bars and beyond to total_bars.
+        _TOKENS_PER_BAR = 250
+        max_safe_seed_bars = max(4, self.config.max_length // _TOKENS_PER_BAR)
+        seed_bars = min(initial_bars, max_safe_seed_bars)
+
+        seed_music = self.generate_music(
+            genre_id=genre_id,
+            instruments=instruments,
+            num_bars=seed_bars,
+            temperature=temperature,
+        )
+
+        current_music = seed_music
+
+        # Measure actual seed length — the loop handles everything from here to total_bars
+        all_ends = [n.time + n.duration for t in current_music.tracks for n in t.notes]
+        if all_ends:
+            current_bars = math.ceil(max(all_ends) / ticks_per_bar)
+        else:
+            current_bars = 0
+
+        while current_bars < total_bars:
+            # Extract the last `context_bars` bars as the prompt
+            prompt = self._extract_last_n_bars(current_music, context_bars, ticks_per_bar)
+
+            # Generate continuation (model sees prompt, produces chunk_bars more)
+            continued = self.generate_with_prompt(
+                prompt_music=prompt,
+                genre_id=genre_id,
+                continuation_bars=chunk_bars,
+                temperature=temperature,
+            )
+
+            # Slice out only the newly generated notes (after the prompt region)
+            context_ticks = context_bars * ticks_per_bar
+            new_notes = self._extract_notes_after(continued, context_ticks)
+
+            # Append new notes to the main piece at the correct time offset
+            append_offset = current_bars * ticks_per_bar
+            self._append_notes(current_music, new_notes, append_offset, context_ticks)
+
+            current_bars += chunk_bars
+
+        return current_music
+
+    @staticmethod
+    def _trim_to_bars(
+        music: muspy.Music,
+        num_bars: int,
+        ticks_per_bar: int,
+    ) -> muspy.Music:
+        """Remove notes that start at or after num_bars, clip durations that overshoot."""
+        cutoff = num_bars * ticks_per_bar
+        for track in music.tracks:
+            kept = []
+            for n in track.notes:
+                if n.time >= cutoff:
+                    continue
+                if n.time + n.duration > cutoff:
+                    n = muspy.Note(
+                        time=n.time,
+                        pitch=n.pitch,
+                        duration=cutoff - n.time,
+                        velocity=n.velocity,
+                    )
+                kept.append(n)
+            track.notes = kept
+        return music
+
+    @staticmethod
+    def _extract_last_n_bars(
+        music: muspy.Music,
+        n_bars: int,
+        ticks_per_bar: int,
+    ) -> muspy.Music:
+        """Extract only the last n_bars from a Music object, rebased to time 0."""
+        all_ends = [n.time + n.duration for t in music.tracks for n in t.notes]
+        if not all_ends:
+            return music
+
+        total_ticks = max(all_ends)
+        total_bars = total_ticks / ticks_per_bar
+        cut_bar = max(0, int(total_bars) - n_bars)
+        cut_tick = cut_bar * ticks_per_bar
+
+        new_tracks = []
+        for track in music.tracks:
+            new_notes = [
+                muspy.Note(
+                    time=int(n.time - cut_tick),
+                    pitch=n.pitch,
+                    duration=n.duration,
+                    velocity=n.velocity,
+                )
+                for n in track.notes
+                if n.time >= cut_tick
+            ]
+            new_tracks.append(muspy.Track(
+                program=track.program,
+                is_drum=track.is_drum,
+                name=track.name,
+                notes=sorted(new_notes, key=lambda n: n.time),
+            ))
+
+        return muspy.Music(
+            resolution=music.resolution,
+            tempos=music.tempos,
+            tracks=new_tracks,
+        )
+
+    @staticmethod
+    def _extract_notes_after(
+        music: muspy.Music,
+        after_tick: int,
+    ) -> Dict[tuple, list]:
+        """Get notes starting at or after after_tick, grouped by (program, is_drum)."""
+        result = {}
+        for track in music.tracks:
+            key = (track.program, track.is_drum)
+            notes = [n for n in track.notes if n.time >= after_tick]
+            if notes:
+                result[key] = (track, notes)
+        return result
+
+    @staticmethod
+    def _append_notes(
+        music: muspy.Music,
+        new_notes_by_track: Dict[tuple, list],
+        append_offset: int,
+        context_ticks: int,
+    ) -> None:
+        """Append new notes to existing music, shifted to the correct global time."""
+        for (program, is_drum), (src_track, notes) in new_notes_by_track.items():
+            # Find the matching track in the existing piece
+            target = None
+            for track in music.tracks:
+                if track.program == program and track.is_drum == is_drum:
+                    target = track
+                    break
+
+            if target is None:
+                target = muspy.Track(
+                    program=program,
+                    is_drum=is_drum,
+                    name=src_track.name,
+                    notes=[],
+                )
+                music.tracks.append(target)
+
+            for note in notes:
+                target.notes.append(muspy.Note(
+                    time=int(note.time - context_ticks + append_offset),
+                    pitch=note.pitch,
+                    duration=note.duration,
+                    velocity=note.velocity,
+                ))
+
+            target.notes.sort(key=lambda n: n.time)
 
 
 # Backwards compatibility aliases
