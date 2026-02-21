@@ -141,6 +141,31 @@ class BaseMusicModel(ABC, keras.Model):
         generated = start_tokens
         min_length = min_length or 0
 
+        use_kv_cache = hasattr(self, 'generate_step')
+
+        if use_kv_cache:
+            # Initial forward pass: process full prompt, build KV-cache
+            logits, caches = self.generate_step(start_tokens, past_caches=None)
+
+            for step in range(max_length - tf.shape(start_tokens)[1]):
+                next_logits = logits[:, -1, :] / temperature
+                next_logits = self._apply_sampling_filters(next_logits, top_k, top_p)
+
+                next_token = tf.random.categorical(next_logits, num_samples=1)
+                next_token = tf.cast(next_token, tf.int32)
+                generated = tf.concat([generated, next_token], axis=1)
+
+                current_length = tf.shape(generated)[1]
+                if eos_token_id is not None and current_length >= min_length:
+                    if tf.reduce_all(next_token == eos_token_id):
+                        break
+
+                # Single-token forward pass with cache
+                logits, caches = self.generate_step(next_token, past_caches=caches)
+
+            return generated
+
+        # Fallback: no KV-cache (LSTM or other models)
         for step in range(max_length - tf.shape(start_tokens)[1]):
             # Get predictions for next token
             inputs = {'input_ids': generated}
@@ -148,43 +173,7 @@ class BaseMusicModel(ABC, keras.Model):
 
             # Get logits for last position only
             next_logits = logits[:, -1, :] / temperature
-
-            # Apply top-k filtering
-            if top_k is not None:
-                top_k_logits, top_k_indices = tf.math.top_k(next_logits, k=top_k)
-                # Set all non-top-k logits to -inf
-                indices_to_remove = tf.less(
-                    next_logits,
-                    tf.reduce_min(top_k_logits, axis=-1, keepdims=True)
-                )
-                next_logits = tf.where(
-                    indices_to_remove,
-                    tf.ones_like(next_logits) * -1e9,
-                    next_logits
-                )
-
-            # Apply top-p (nucleus) filtering
-            if top_p is not None:
-                sorted_logits = tf.sort(next_logits, direction='DESCENDING', axis=-1)
-                sorted_probs = tf.nn.softmax(sorted_logits, axis=-1)
-                cumulative_probs = tf.cumsum(sorted_probs, axis=-1)
-
-                # Remove tokens with cumulative prob above threshold
-                sorted_indices_to_remove = cumulative_probs > top_p
-                # Shift right to keep first token above threshold
-                sorted_indices_to_remove = tf.concat([
-                    tf.zeros_like(sorted_indices_to_remove[:, :1]),
-                    sorted_indices_to_remove[:, :-1]
-                ], axis=-1)
-
-                # Scatter back to original ordering
-                indices = tf.argsort(tf.argsort(next_logits, direction='DESCENDING'))
-                indices_to_remove = tf.gather(sorted_indices_to_remove, indices, batch_dims=1)
-                next_logits = tf.where(
-                    indices_to_remove,
-                    tf.ones_like(next_logits) * -1e9,
-                    next_logits
-                )
+            next_logits = self._apply_sampling_filters(next_logits, top_k, top_p)
 
             # Sample from distribution
             next_token = tf.random.categorical(next_logits, num_samples=1)
@@ -200,6 +189,46 @@ class BaseMusicModel(ABC, keras.Model):
                     break
 
         return generated
+
+    @staticmethod
+    def _apply_sampling_filters(
+        next_logits: tf.Tensor,
+        top_k: Optional[int],
+        top_p: Optional[float],
+    ) -> tf.Tensor:
+        """Apply top-k and top-p filtering to logits."""
+        if top_k is not None:
+            top_k_logits, _ = tf.math.top_k(next_logits, k=top_k)
+            indices_to_remove = tf.less(
+                next_logits,
+                tf.reduce_min(top_k_logits, axis=-1, keepdims=True)
+            )
+            next_logits = tf.where(
+                indices_to_remove,
+                tf.ones_like(next_logits) * -1e9,
+                next_logits
+            )
+
+        if top_p is not None:
+            sorted_logits = tf.sort(next_logits, direction='DESCENDING', axis=-1)
+            sorted_probs = tf.nn.softmax(sorted_logits, axis=-1)
+            cumulative_probs = tf.cumsum(sorted_probs, axis=-1)
+
+            sorted_indices_to_remove = cumulative_probs > top_p
+            sorted_indices_to_remove = tf.concat([
+                tf.zeros_like(sorted_indices_to_remove[:, :1]),
+                sorted_indices_to_remove[:, :-1]
+            ], axis=-1)
+
+            indices = tf.argsort(tf.argsort(next_logits, direction='DESCENDING'))
+            indices_to_remove = tf.gather(sorted_indices_to_remove, indices, batch_dims=1)
+            next_logits = tf.where(
+                indices_to_remove,
+                tf.ones_like(next_logits) * -1e9,
+                next_logits
+            )
+
+        return next_logits
 
     @abstractmethod
     def get_config(self) -> Dict[str, Any]:

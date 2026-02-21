@@ -139,6 +139,121 @@ class GenerationCLI:
             'min_length': 256,
         }
 
+    # =========================================================================
+    # Instrument Helpers
+    # =========================================================================
+
+    def _get_top_instruments(self, top_n: int = 20) -> List[tuple]:
+        """Return the top N most-used instruments as (program_id, name, count) tuples."""
+        from ..data.vocabulary import INSTRUMENT_NAME_TO_ID
+        vocab = self.bundle.vocabulary
+        stats = vocab.get_instrument_stats()
+        sorted_stats = sorted(stats.items(), key=lambda x: x[1], reverse=True)
+        result = []
+        for name, count in sorted_stats[:top_n]:
+            prog_id = INSTRUMENT_NAME_TO_ID.get(name, -1)
+            if prog_id >= 0:
+                result.append((prog_id, name, count))
+        return result
+
+    def _select_instruments(self, genre_id: int) -> Optional[List[int]]:
+        """
+        Interactive instrument selection backed by vocabulary frequency data.
+
+        Returns a list of allowed program IDs, or None (no filtering).
+        """
+        if not self.bundle or not self.bundle.vocabulary:
+            return None
+
+        from ..data.vocabulary import GENERAL_MIDI_INSTRUMENTS
+
+        top_instruments = self._get_top_instruments(20)
+        if not top_instruments:
+            return None
+
+        print("\n  Most used instruments in training data:")
+        print(f"  {'Rank':<5} {'ID':<5} {'Instrument':<32} {'Songs'}")
+        print("  " + "-" * 55)
+        for rank, (prog_id, name, count) in enumerate(top_instruments, 1):
+            tag = " [DRUMS]" if prog_id == 128 else ""
+            print(f"  {rank:<5} {prog_id:<5} {name:<32}{count}{tag}")
+
+        print()
+        print("  [1] Use top 5  (recommended)")
+        print("  [2] Use top 10")
+        print("  [3] Enter custom IDs")
+        print("  [0] No filtering (model decides freely)")
+        print("-" * 60)
+
+        choice = get_choice("Instrument selection", 3)
+
+        if choice == 0:
+            return None
+
+        if choice in (1, 2):
+            n = 5 if choice == 1 else 10
+            selected = [prog_id for prog_id, _, _ in top_instruments[:n]]
+        else:
+            print("  Enter space-separated MIDI program IDs (0-127, or 128 for drums).")
+            print("  Example: 0 33 25 128  → Piano, Electric Bass, Steel Guitar, Drums")
+            raw = get_input("Instrument IDs")
+            if not raw:
+                return None
+            try:
+                ids = [int(x) for x in raw.split()]
+                selected = [i for i in ids if 0 <= i <= 128]
+            except ValueError:
+                print("  Invalid input — no filtering applied.")
+                return None
+
+        if selected:
+            names = [GENERAL_MIDI_INSTRUMENTS.get(p, "Drums") for p in selected]
+            print(f"\n  Using instruments: {names}")
+        return selected or None
+
+    def _remap_instruments(self, music, allowed_programs: List[int]):
+        """
+        Remap track programs to the nearest allowed instrument, then merge tracks
+        that share the same program after remapping.
+        """
+        import muspy
+        from ..data.vocabulary import GENERAL_MIDI_INSTRUMENTS
+
+        allowed_melodic = [p for p in allowed_programs if p != 128]
+        allow_drums = 128 in allowed_programs
+
+        merged: Dict[int, Any] = {}  # program_key -> muspy.Track
+
+        for track in music.tracks:
+            if track.is_drum:
+                if not allow_drums:
+                    continue
+                key = 128
+            else:
+                if not allowed_melodic:
+                    continue
+                prog = track.program
+                if prog in allowed_melodic:
+                    key = prog
+                else:
+                    key = min(allowed_melodic, key=lambda x: abs(x - prog))
+
+            if key not in merged:
+                is_drum = key == 128
+                merged[key] = muspy.Track(
+                    program=0 if is_drum else key,
+                    is_drum=is_drum,
+                    name="Drums" if is_drum else GENERAL_MIDI_INSTRUMENTS.get(key, f"Program {key}"),
+                    notes=[],
+                )
+            merged[key].notes.extend(track.notes)
+
+        for track in merged.values():
+            track.notes.sort(key=lambda n: n.time)
+
+        music.tracks = list(merged.values())
+        return music
+
     def run(self):
         """Run the generation CLI."""
         clear_screen()
@@ -162,7 +277,6 @@ class GenerationCLI:
             "View Genres",
             "View Instruments",
             "Generate Music",
-            "Generate Extended (Concatenation)",
             "Generation Settings",
         ]
         print_menu("Main Menu", options)
@@ -192,8 +306,6 @@ class GenerationCLI:
         elif choice == 5:
             self.generate_music()
         elif choice == 6:
-            self.generate_extended()
-        elif choice == 7:
             self.settings_menu()
 
     # =========================================================================
@@ -356,6 +468,23 @@ class GenerationCLI:
     # Generate Music
     # =========================================================================
 
+    def _create_poly_generator(self, max_length: Optional[int] = None):
+        """Create a PolyGenerator from the loaded bundle."""
+        from ..generation.poly_generator import PolyGenerator, PolyGeneratorConfig
+
+        config = PolyGeneratorConfig(
+            max_length=max_length or self.bundle.max_seq_length,
+            temperature=self.settings['temperature'],
+            top_k=self.settings['top_k'],
+            top_p=self.settings['top_p'],
+            resolution=self.bundle.encoder.resolution,
+        )
+        return PolyGenerator(
+            model=self.bundle.model,
+            encoder=self.bundle.encoder,
+            config=config,
+        )
+
     def generate_music(self):
         """Interactive music generation."""
         import muspy
@@ -368,9 +497,13 @@ class GenerationCLI:
             wait_for_enter()
             return
 
+        is_multitrack = isinstance(self.bundle.encoder, MultiTrackEncoder)
+
         # Show model capabilities
         print(f"\n  Model: {self.bundle.model_name}")
         print(f"  Max sequence length: {self.bundle.max_seq_length}")
+        if is_multitrack:
+            print(f"  Mode: Multi-track (PolyGenerator)")
 
         # Show available genres
         if self.bundle.vocabulary:
@@ -388,6 +521,11 @@ class GenerationCLI:
 
         genre_id = get_int("Genre ID (see list above)", 0, min_val=0)
 
+        # Instrument selection (multitrack only)
+        allowed_instruments = None
+        if is_multitrack:
+            allowed_instruments = self._select_instruments(genre_id)
+
         print(f"\n  Current settings:")
         print(f"    Temperature: {self.settings['temperature']}")
         print(f"    Top-k: {self.settings['top_k']}")
@@ -399,248 +537,93 @@ class GenerationCLI:
             self.settings['top_k'] = get_int("Top-k (0=disabled)", self.settings['top_k'], 0, 500)
             self.settings['top_p'] = get_float("Top-p (0.0-1.0)", self.settings['top_p'], 0.0, 1.0)
 
-        max_length = get_int(f"Max sequence length (max: {self.bundle.max_seq_length})",
-                              self.bundle.max_seq_length, 64, self.bundle.max_seq_length)
+        if is_multitrack:
+            num_bars = get_int("Number of bars to generate", 16, min_val=1, max_val=64)
+        else:
+            num_bars = None
 
-        min_length = get_int("Min length before EOS (0=none)", self.settings['min_length'], 0, max_length)
-        self.settings['min_length'] = min_length
+        max_length = get_int(f"Max sequence length (model trained on: {self.bundle.max_seq_length})",
+                              self.bundle.max_seq_length, 64, 8192)
 
-        ignore_eos = get_bool("Ignore EOS (generate full length)", False)
+        num_songs = get_int("Number of songs to generate", 1, min_val=1, max_val=100)
+
         exclude_drums = get_bool("Exclude drums from output", False)
-
         output_path = get_input("Output MIDI file", "output/generated.mid")
 
         # Confirm
         print(f"\n  Will generate with:")
         print(f"    Genre ID: {genre_id}")
         print(f"    Temperature: {self.settings['temperature']}")
+        if num_bars:
+            print(f"    Bars: {num_bars}")
         print(f"    Max length: {max_length}")
-        if min_length > 0:
-            print(f"    Min length: {min_length}")
-        if ignore_eos:
-            print(f"    Ignoring EOS (full {max_length} tokens)")
+        print(f"    Songs: {num_songs}")
+        if allowed_instruments:
+            from ..data.vocabulary import GENERAL_MIDI_INSTRUMENTS
+            names = [GENERAL_MIDI_INSTRUMENTS.get(p, "Drums") for p in allowed_instruments]
+            print(f"    Instruments: {names}")
 
         confirm = get_bool("\nProceed with generation", True)
         if not confirm:
             return
 
-        # Generate
-        print("\nGenerating...")
-        try:
-            tokens = self.bundle.generate(
-                genre_id=genre_id,
-                max_length=max_length,
-                min_length=min_length if min_length > 0 else None,
-                temperature=self.settings['temperature'],
-                top_k=self.settings['top_k'],
-                top_p=self.settings['top_p'],
-                ignore_eos=ignore_eos,
-            )
+        # Build output path template
+        out_base = Path(output_path)
+        out_base.parent.mkdir(parents=True, exist_ok=True)
+        use_numbered = num_songs > 1
+        stem = out_base.stem
+        suffix = out_base.suffix or ".mid"
 
-            print(f"  Generated {len(tokens)} tokens")
+        # Create generator once (reused across all songs)
+        if is_multitrack:
+            generator = self._create_poly_generator(max_length=max_length)
 
-            # Decode to music
-            if isinstance(self.bundle.encoder, MultiTrackEncoder):
-                music = self.bundle.encoder.decode_to_music(tokens)
+        for song_idx in range(num_songs):
+            if use_numbered:
+                out_path = out_base.parent / f"{stem}_{song_idx + 1:02d}{suffix}"
+                print(f"\n[{song_idx + 1}/{num_songs}] Generating...")
             else:
-                music = self.bundle.encoder.decode_to_music(tokens)
-
-            # Exclude drums if requested
-            if exclude_drums:
-                music.tracks = [t for t in music.tracks if not t.is_drum]
-
-            # Save
-            out_path = Path(output_path)
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            muspy.write_midi(str(out_path), music)
-
-            # Print results
-            print(f"\n  Saved to: {output_path}")
-            print(f"  Tracks: {len(music.tracks)}")
-            for i, track in enumerate(music.tracks):
-                name = "Drums" if track.is_drum else f"Program {track.program}"
-                print(f"    [{i}] {name}: {len(track.notes)} notes")
-
-        except Exception as e:
-            print(f"\nError during generation: {e}")
-            import traceback
-            traceback.print_exc()
-
-        wait_for_enter()
-
-    # =========================================================================
-    # Generate Extended (Concatenation)
-    # =========================================================================
-
-    def generate_extended(self):
-        """Generate longer music by concatenating multiple generations."""
-        import muspy
-        from ..data import MultiTrackEncoder
-
-        print_header("Generate Extended Music")
-        print("  Generate longer pieces by concatenating multiple generations.")
-
-        if not self.bundle:
-            print("\n  No model loaded. Use 'Load Model' first.")
-            wait_for_enter()
-            return
-
-        # Show model info
-        print(f"\n  Model: {self.bundle.model_name}")
-        print(f"  Max sequence length per generation: {self.bundle.max_seq_length}")
-
-        # Show genres
-        if self.bundle.vocabulary:
-            vocab = self.bundle.vocabulary
-            genres = list(vocab.genre_to_id.items())
-            if genres:
-                print(f"\n  Available Genres:")
-                for name, gid in sorted(genres, key=lambda x: x[1])[:10]:
-                    print(f"    [{gid}] {name}")
-
-        # Get parameters
-        print("\n--- Extended Generation Parameters ---")
-
-        genre_id = get_int("Genre ID", 0, min_val=0)
-
-        # Duration options
-        print("\n  Specify desired length:")
-        print("    [1] By number of segments to concatenate")
-        print("    [2] By approximate duration in bars")
-
-        length_method = get_int("Choice", 1, min_val=1, max_val=2)
-
-        num_segments = 1
-        if length_method == 1:
-            num_segments = get_int("Number of segments to generate", 3, min_val=1, max_val=10)
-        else:
-            approx_bars = get_int("Approximate bars (each segment ~8-16 bars)", 32, min_val=8)
-            bars_per_segment = 12  # Rough estimate
-            num_segments = max(1, approx_bars // bars_per_segment)
-            print(f"  Will generate ~{num_segments} segments")
-
-        segment_length = get_int(f"Tokens per segment (max: {self.bundle.max_seq_length})",
-                                  self.bundle.max_seq_length, 256, self.bundle.max_seq_length)
-
-        print(f"\n  Generation settings:")
-        print(f"    Temperature: {self.settings['temperature']}")
-        print(f"    Top-k: {self.settings['top_k']}")
-        print(f"    Top-p: {self.settings['top_p']}")
-
-        modify = get_bool("Modify settings", False)
-        if modify:
-            self.settings['temperature'] = get_float("Temperature", self.settings['temperature'], 0.1, 2.0)
-            self.settings['top_k'] = get_int("Top-k", self.settings['top_k'], 0, 500)
-            self.settings['top_p'] = get_float("Top-p", self.settings['top_p'], 0.0, 1.0)
-
-        exclude_drums = get_bool("Exclude drums from output", False)
-        output_path = get_input("Output MIDI file", "output/extended.mid")
-
-        print(f"\n  Will generate {num_segments} segments and concatenate.")
-
-        confirm = get_bool("\nProceed", True)
-        if not confirm:
-            return
-
-        # Generate segments
-        print("\nGenerating segments...")
-        all_tracks: Dict[int, List[muspy.Note]] = {}  # program -> notes
-
-        total_time_offset = 0
-
-        for seg_idx in range(num_segments):
-            print(f"  Segment {seg_idx + 1}/{num_segments}...")
+                out_path = out_base
+                print("\nGenerating...")
 
             try:
-                tokens = self.bundle.generate(
-                    genre_id=genre_id,
-                    max_length=segment_length,
-                    min_length=segment_length // 2,
-                    temperature=self.settings['temperature'],
-                    top_k=self.settings['top_k'],
-                    top_p=self.settings['top_p'],
-                    ignore_eos=True,  # Always generate full segment for concatenation
-                )
-
-                # Decode
-                if isinstance(self.bundle.encoder, MultiTrackEncoder):
-                    music = self.bundle.encoder.decode_to_music(tokens)
+                if is_multitrack:
+                    music = generator.generate_music(
+                        genre_id=genre_id,
+                        instruments=allowed_instruments,
+                        num_bars=num_bars,
+                        temperature=self.settings['temperature'],
+                    )
+                    if allowed_instruments:
+                        music = self._remap_instruments(music, allowed_instruments)
                 else:
+                    tokens = self.bundle.generate(
+                        genre_id=genre_id,
+                        max_length=max_length,
+                        temperature=self.settings['temperature'],
+                        top_k=self.settings['top_k'],
+                        top_p=self.settings['top_p'],
+                    )
+                    print(f"  Generated {len(tokens)} tokens")
                     music = self.bundle.encoder.decode_to_music(tokens)
 
-                # Get segment duration
-                segment_duration = 0
-                for track in music.tracks:
-                    if track.notes:
-                        track_end = max(n.time + n.duration for n in track.notes)
-                        segment_duration = max(segment_duration, track_end)
+                # Exclude drums if requested
+                if exclude_drums:
+                    music.tracks = [t for t in music.tracks if not t.is_drum]
 
-                # Add notes to combined tracks with time offset
-                for track in music.tracks:
-                    if exclude_drums and track.is_drum:
-                        continue
+                muspy.write_midi(str(out_path), music)
 
-                    program = 128 if track.is_drum else track.program
-
-                    if program not in all_tracks:
-                        all_tracks[program] = []
-
-                    for note in track.notes:
-                        offset_note = muspy.Note(
-                            time=note.time + total_time_offset,
-                            pitch=note.pitch,
-                            duration=note.duration,
-                            velocity=note.velocity,
-                        )
-                        all_tracks[program].append(offset_note)
-
-                total_time_offset += segment_duration
-                print(f"    Generated {len(tokens)} tokens, duration {segment_duration} ticks")
+                total_notes = sum(len(t.notes) for t in music.tracks)
+                print(f"  Saved to: {out_path}")
+                print(f"  Tracks: {len(music.tracks)}, Total notes: {total_notes}")
+                for i, track in enumerate(music.tracks):
+                    name = "Drums" if track.is_drum else f"Program {track.program}"
+                    print(f"    [{i}] {name}: {len(track.notes)} notes")
 
             except Exception as e:
-                print(f"    Error in segment {seg_idx + 1}: {e}")
-                continue
-
-        # Build final music object
-        print("\nBuilding combined music...")
-
-        resolution = getattr(self.bundle.encoder, 'resolution', 24)
-        final_music = muspy.Music(
-            resolution=resolution,
-            tempos=[muspy.Tempo(time=0, qpm=120)],
-            tracks=[],
-        )
-
-        for program, notes in all_tracks.items():
-            is_drum = (program == 128)
-            track = muspy.Track(
-                program=0 if is_drum else program,
-                is_drum=is_drum,
-                name="Drums" if is_drum else f"Program {program}",
-                notes=sorted(notes, key=lambda n: n.time),
-            )
-            final_music.tracks.append(track)
-
-        # Save
-        out_path = Path(output_path)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        muspy.write_midi(str(out_path), final_music)
-
-        # Print results
-        total_notes = sum(len(t.notes) for t in final_music.tracks)
-        ticks_per_bar = resolution * 4
-        total_bars = total_time_offset / ticks_per_bar if ticks_per_bar > 0 else 0
-
-        print(f"\n  Extended generation complete!")
-        print(f"  Saved to: {output_path}")
-        print(f"  Total segments: {num_segments}")
-        print(f"  Total duration: ~{total_bars:.1f} bars")
-        print(f"  Total tracks: {len(final_music.tracks)}")
-        print(f"  Total notes: {total_notes}")
-        print(f"\n  Tracks:")
-        for i, track in enumerate(final_music.tracks):
-            name = "Drums" if track.is_drum else f"Program {track.program}"
-            print(f"    [{i}] {name}: {len(track.notes)} notes")
+                print(f"\nError during generation: {e}")
+                import traceback
+                traceback.print_exc()
 
         wait_for_enter()
 
