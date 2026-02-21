@@ -16,9 +16,16 @@ Famam is a deep-learning framework for generating MIDI music. It supports both p
 ## Quick Start
 
 ### 1. Install dependencies
+You need conda for for use in the cluster and is recommended.
+https://docs.conda.io/projects/conda/en/latest/user-guide/install/index.html
 
 ```bash
-pip install -r requirements.txt
+conda create -n famam python=3.9 anaconda
+source activate famam
+```
+
+```bash
+conda install -n yourenvname [package]
 ```
 
 ### 2. Download the pre-trained model
