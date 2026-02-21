@@ -414,13 +414,15 @@ class MultiTrackEncoder(BaseEncoder):
         """
         Create conditioning tokens for generation.
 
-        For multi-track generation, we start with BOS and genre.
-        Instruments are specified per-event during generation.
+        Sequence: [BOS, genre, inst_hint_0, inst_hint_1, ..., (bar added by caller)]
 
         Args:
             genre_id: Genre ID
             instrument_id: Ignored (for compatibility with base class)
-            instruments: Optional list of instruments to include
+            instruments: Optional list of MIDI program IDs (0-127 melodic, 128 drums)
+                         to hint which instruments should appear. These are injected
+                         as instrument tokens right after the genre token, biasing
+                         the model toward those programs.
 
         Returns:
             Array of conditioning tokens
@@ -429,6 +431,11 @@ class MultiTrackEncoder(BaseEncoder):
 
         if genre_id is not None:
             tokens.append(self.genre_token(genre_id))
+
+        if instruments:
+            for inst_id in instruments:
+                if 0 <= inst_id <= 128:
+                    tokens.append(self.INSTRUMENT_OFFSET + inst_id)
 
         return np.array(tokens, dtype=np.int32)
 

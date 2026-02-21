@@ -10,7 +10,7 @@ Uses relative positional attention to learn distance-based patterns
 Author: Murilo de Freitas Spinelli
 """
 
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 
 import tensorflow as tf
 from tensorflow import keras
@@ -127,19 +127,41 @@ class RelativeMultiHeadAttention(layers.Layer):
         value: tf.Tensor,
         attention_mask: Optional[tf.Tensor] = None,
         training: bool = False,
+        cache: Optional[tuple] = None,
+        use_cache: bool = False,
     ) -> tf.Tensor:
         batch_size = tf.shape(query)[0]
-        seq_len = tf.shape(query)[1]
 
         q = self._split_heads(self.wq(query), batch_size)
         k = self._split_heads(self.wk(key), batch_size)
         v = self._split_heads(self.wv(value), batch_size)
 
+        if cache is not None:
+            k = tf.concat([cache[0], k], axis=2)
+            v = tf.concat([cache[1], v], axis=2)
+
         # Content-based attention
         content_scores = tf.matmul(q, k, transpose_b=True)
 
         # Relative position scores
-        rel_pos_emb = self.relative_pos_emb(seq_len)
+        if cache is not None:
+            # Cached: query is at the last position, keys span full history
+            seq_len_k = tf.shape(k)[2]
+            query_pos = seq_len_k - 1
+            key_positions = tf.range(seq_len_k)
+            distances = key_positions - query_pos
+            distances_clipped = tf.clip_by_value(
+                distances,
+                -self.max_relative_position,
+                self.max_relative_position,
+            )
+            indices = distances_clipped + self.max_relative_position
+            rel_pos_emb = tf.gather(self.relative_pos_emb.embeddings, indices)
+            rel_pos_emb = rel_pos_emb[tf.newaxis, :, :]  # (1, key_len, head_dim)
+        else:
+            seq_len = tf.shape(query)[1]
+            rel_pos_emb = self.relative_pos_emb(seq_len)
+
         position_scores = tf.einsum('bhid,ijd->bhij', q, rel_pos_emb)
 
         attention_scores = (content_scores + position_scores) / self.scale
@@ -156,8 +178,11 @@ class RelativeMultiHeadAttention(layers.Layer):
 
         output = tf.matmul(attention_weights, v)
         output = self._merge_heads(output, batch_size)
+        output = self.wo(output)
 
-        return self.wo(output)
+        if use_cache:
+            return output, (k, v)
+        return output
 
     def get_config(self):
         config = super().get_config()
@@ -221,17 +246,24 @@ class TransformerBlock(layers.Layer):
             layers.Dropout(dropout_rate),
         ])
 
-    def call(self, x, attention_mask=None, training=False):
+    def call(self, x, attention_mask=None, training=False, cache=None, use_cache=False):
         # Self-attention
         x_norm = self.norm1(x)
         if self.use_relative_attention:
-            attn_output = self.mha(
+            attn_result = self.mha(
                 query=x_norm,
                 key=x_norm,
                 value=x_norm,
                 attention_mask=attention_mask,
                 training=training,
+                cache=cache,
+                use_cache=use_cache,
             )
+            if use_cache:
+                attn_output, new_cache = attn_result
+            else:
+                attn_output = attn_result
+                new_cache = None
         else:
             attn_output = self.mha(
                 query=x_norm,
@@ -240,6 +272,7 @@ class TransformerBlock(layers.Layer):
                 attention_mask=attention_mask,
                 training=training,
             )
+            new_cache = None
         x = x + attn_output
 
         # FFN
@@ -247,6 +280,8 @@ class TransformerBlock(layers.Layer):
         ffn_output = self.ffn(x_norm, training=training)
         x = x + ffn_output
 
+        if use_cache:
+            return x, new_cache
         return x
 
     def get_config(self):
@@ -362,6 +397,47 @@ class TransformerModel(BaseMusicModel):
         logits = self.output_projection(x)
 
         return logits
+
+    def generate_step(
+        self,
+        input_ids: tf.Tensor,
+        past_caches: Optional[List] = None,
+    ) -> Tuple[tf.Tensor, List]:
+        """
+        Single-step forward pass with KV-cache for fast generation.
+
+        Args:
+            input_ids: Token IDs - full prompt on first call, single token after.
+            past_caches: List of (K, V) tuples per layer, or None for first call.
+
+        Returns:
+            (logits, new_caches) tuple.
+        """
+        # Causal mask only needed for the initial multi-token prompt pass
+        if past_caches is None:
+            seq_len = tf.shape(input_ids)[1]
+            causal_mask = get_causal_attention_mask(seq_len)
+        else:
+            causal_mask = None
+
+        x = self.embed_tokens(input_ids, training=False)
+
+        new_caches = []
+        for i, block in enumerate(self.transformer_blocks):
+            cache = past_caches[i] if past_caches is not None else None
+            x, new_cache = block(
+                x,
+                attention_mask=causal_mask,
+                training=False,
+                cache=cache,
+                use_cache=True,
+            )
+            new_caches.append(new_cache)
+
+        x = self.final_norm(x)
+        logits = self.output_projection(x)
+
+        return logits, new_caches
 
     def get_config(self) -> Dict[str, Any]:
         return {

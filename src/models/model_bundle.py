@@ -374,8 +374,14 @@ class ModelBundle:
         Returns:
             Array of generated token IDs
         """
+        from ..data.encoders.multitrack_encoder import MultiTrackEncoder
+
         max_length = max_length or self.max_seq_length
         start_tokens = self.create_start_tokens(genre_id, instrument_id)
+
+        # Multi-track models expect an initial bar token after conditioning
+        if isinstance(self.encoder, MultiTrackEncoder):
+            start_tokens = np.append(start_tokens, self.encoder.bar_token(0))
 
         # Add batch dimension if needed (model expects 2D: batch, length)
         if len(start_tokens.shape) == 1:

@@ -1,1 +1,0 @@
-test with all available options i made, especially ltsm and the encodings
