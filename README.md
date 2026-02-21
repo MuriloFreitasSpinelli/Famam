@@ -1,15 +1,15 @@
-# Famam — Multi-Track Music Generation
+# Famam — Music Generation
 
-Famam is a deep-learning framework for generating polyphonic, multi-track MIDI music. It uses a Music Transformer with relative positional attention to generate all instruments simultaneously, learning the harmonic and rhythmic relationships between them.
+Famam is a deep-learning framework for generating MIDI music. It supports both polyphonic multi-track generation (all instruments simultaneously) and monophonic single-track generation, across multiple model architectures and encoding schemes.
 
 ## Features
 
-- **Polyphonic generation** — all instruments are generated in a single interleaved sequence, so each instrument is aware of what every other instrument is playing at every moment
+- **Polyphonic & monophonic generation** — polyphonic mode generates all instruments in a single interleaved sequence so every instrument is aware of all others; monophonic mode generates single-track melodies
+- **Multiple encodings** — interleaved multi-track, event-based, and REMI encodings; choose the representation that best suits your data and use case
+- **Transformer & LSTM backbones** — Transformer with relative positional attention (based on [Music Transformer, Huang et al. 2018](https://arxiv.org/abs/1809.04281)) or stacked LSTM; both configurable in depth and width
 - **Genre & instrument conditioning** — steer generation toward specific genres and instrument sets drawn from the training vocabulary
-- **Relative positional attention** — based on [Music Transformer (Huang et al. 2018)](https://arxiv.org/abs/1809.04281), learns distance-based patterns like repetition and phrase structure rather than absolute positions
 - **Full training pipeline** — dataset building from raw MIDI, configurable training, checkpoint management, model bundling
 - **GUI and CLI** — graphical interface for quick generation, menu-driven CLI for full control
-- **Flexible architecture** — Transformer or LSTM backbone, configurable depth and width
 
 ---
 
@@ -173,7 +173,7 @@ python run_cli.py experiment
 # → Train Model
 ```
 
-Key training config options:
+Key training config options (Transformer example):
 ```json
 {
   "model_type": "transformer",
@@ -189,6 +189,8 @@ Key training config options:
   "epochs": 100
 }
 ```
+
+For an LSTM, set `"model_type": "lstm"` and replace the transformer-specific fields with `"lstm_units"` (list of units per layer, e.g. `[512, 512]`). Ready-made configs for both architectures at small and large scales are in `configs/model_training/`.
 
 **Step 3 — Bundle for inference**
 
@@ -212,9 +214,12 @@ python -m src.cli.cluster_train \
 
 ## Architecture
 
-### Encoding
+### Encodings
 
-Music is converted to a flat token sequence using the **interleaved multi-track** encoder. Notes from all instruments are sorted by time position and merged into a single stream:
+Three encoding schemes are supported, selectable per dataset via `encoder_type` in the dataset config:
+
+**`multitrack` — Interleaved multi-track (polyphonic)**
+All instruments are merged into a single time-sorted token stream. The model generates every instrument simultaneously, attending to all others at each step:
 
 ```
 BOS  genre  bar_0
@@ -225,19 +230,23 @@ BOS  genre  bar_0
 bar_1  ...  EOS
 ```
 
-Because all instruments share one sequence, the model attends to every other instrument when predicting the next token — the guitar at beat 3 has already seen the drums and bass at beat 1.
+**`event` — Event-based (monophonic / single-track)**
+A sequential stream of note-on, pitch, velocity, duration, and note-off events. Simpler and faster to train, suited for single-instrument or melody generation.
 
-### Relative positional attention
+**`remi` — REMI (monophonic / single-track)**
+REMI-style encoding with explicit bar and position markers, following [Pop Music Transformer (Huang & Yang, 2020)](https://arxiv.org/abs/2002.00212).
 
-Attention scores include a learned relative-position term:
+### Model backbones
+
+**Transformer** — uses relative multi-head attention where position scores are computed as:
 
 ```
 score = (Q @ K^T + Q @ E_rel^T) / sqrt(d_k)
 ```
 
-`E_rel` is a learnable matrix indexed by the relative distance between tokens, clipped to `[-max_relative_position, max_relative_position]`. This lets the model learn structural patterns — *this phrase repeats 4 bars later* — rather than absolute positions.
+`E_rel` is a learnable matrix indexed by relative token distance, clipped to `[-max_relative_position, max_relative_position]`. This lets the model learn structural patterns — *this phrase repeats 4 bars later* — rather than absolute positions. KV-caching is used during inference for efficient token-by-token generation.
 
-KV-caching is used during inference for efficient token-by-token generation.
+**LSTM** — stacked LSTM layers with optional bidirectional encoding. Lighter to train and faster to run, at the cost of shorter effective context.
 
 ---
 
