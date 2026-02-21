@@ -269,6 +269,39 @@ See `requirements.txt` for the full list.
 
 ---
 
+## Testing
+
+Famam includes a pytest-based test suite to ensure core components work correctly.  
+The tests cover:
+
+- LSTM model forward pass
+- Model save and load (serialization)
+- Configuration object instantiation
+- CLI and module import integrity
+- Generation module imports
+
+### Run all tests
+
+Install dependencies first:
+
+```bash
+pip install -r requirements.txt
+```
+
+Then run the full test suite:
+
+```bash
+python -m pytest
+
+# Or in quiet mode
+python -m pytest -q
+```
+
+Tests are automatically discovered inside the `tests/` directory.
+Pytest behavior is configured via `pytest.ini`.
+
+---
+
 ## Acknowledgements
 
 - [Music Transformer](https://arxiv.org/abs/1809.04281) — Huang et al., 2018
